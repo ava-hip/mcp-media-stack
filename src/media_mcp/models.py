@@ -10,6 +10,16 @@ def hardlink_note(service: str) -> str:
     )
 
 
+# Hardlink reminder from the torrent client's point of view (qBittorrent via qui):
+# here we delete the torrent AND its files, so the caveat is the reverse of hardlink_note.
+def torrent_hardlink_note() -> str:
+    return (
+        "The torrent's downloaded files will be deleted. If those files are hardlinked "
+        "to your Sonarr/Radarr library, the library copy remains and the disk space is "
+        "fully reclaimed only once BOTH the library file(s) and this torrent are removed."
+    )
+
+
 def format_size(num_bytes: int) -> str:
     """Format a byte count as a human-readable string (base 1024), e.g. '18.4 GB'."""
     gib = 1_073_741_824
@@ -57,6 +67,20 @@ class HistoryRecordSummary(BaseModel):
     source_title: str
     date: str
     download_id: str | None
+
+
+class TorrentSummary(BaseModel):
+    name: str
+    hash: str
+    state: str
+    progress: float  # fraction 0..1 as returned by qBittorrent
+    size: int
+    ratio: float
+    category: str
+
+    @property
+    def progress_pct(self) -> int:
+        return round(self.progress * 100)
 
 
 class QualityProfile(BaseModel):

@@ -15,5 +15,13 @@ class Settings(BaseSettings):
     radarr_url: AnyHttpUrl = AnyHttpUrl("http://localhost:7878")
     radarr_api_key: str = ""
 
+    # qBittorrent access goes through "qui" (autobrr), not qBittorrent directly.
+    # Empty values mean "not configured" — the QuiClient raises a clear error.
+    qui_url: str = ""
+    qui_api_key: str = ""
+    # Optional target instance (id or name). If empty and a single instance exists,
+    # it is selected automatically; if several exist, resolution raises a clear error.
+    qui_instance: str = ""
+
 
 settings = Settings()

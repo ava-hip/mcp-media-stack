@@ -1,7 +1,7 @@
 # media-mcp
 
-Serveur MCP local (transport stdio) pour piloter un stack média self-hosted.
-Première itération : **Sonarr** + **Radarr**.
+Serveur MCP local (transport stdio) pour piloter un stack média self-hosted :
+**Sonarr** + **Radarr**, et **qBittorrent via [qui](https://getqui.com)** (autobrr).
 
 ## Prérequis
 
@@ -45,7 +45,10 @@ Ajouter dans `~/Library/Application Support/Claude/claude_desktop_config.json`
         "SONARR_URL": "http://localhost:8989",
         "SONARR_API_KEY": "xxx",
         "RADARR_URL": "http://localhost:7878",
-        "RADARR_API_KEY": "xxx"
+        "RADARR_API_KEY": "xxx",
+        "QUI_URL": "https://qui.example.com",
+        "QUI_API_KEY": "xxx",
+        "QUI_INSTANCE": ""
       }
     }
   }
@@ -62,6 +65,9 @@ Remplacer `/chemin/absolu/media-mcp` par le chemin réel du projet.
 | `SONARR_API_KEY` | Clé API Sonarr | *(requis)* |
 | `RADARR_URL` | URL de base Radarr | `http://localhost:7878` |
 | `RADARR_API_KEY` | Clé API Radarr | *(requis)* |
+| `QUI_URL` | URL de base de l'instance qui | *(requis pour qBit)* |
+| `QUI_API_KEY` | Clé API qui (Settings > API Keys) | *(requis pour qBit)* |
+| `QUI_INSTANCE` | Instance qBit ciblée (id ou nom) ; vide = auto si une seule | *(optionnel)* |
 
 ## Tools disponibles
 
@@ -106,6 +112,31 @@ Remplacer `/chemin/absolu/media-mcp` par le chemin réel du projet.
 | `radarr_search_movie(movie_id, confirm=False)` | write | Lance la recherche d'un film |
 | `radarr_delete_movie_file(movie_id, confirm=False)` | destructive | Supprime le fichier d'un film (garde le film suivi) |
 | `radarr_delete_movie(movie_id, delete_files=False, confirm=False)` | destructive | Supprime un film |
+
+### qBittorrent (via qui)
+
+> **Accès uniquement via [qui](https://getqui.com)** (le gestionnaire web multi-instance
+> d'autobrr), **jamais** via l'API qBittorrent directe. Auth par header `X-API-Key`.
+> Les tools ciblent l'instance résolue depuis `QUI_INSTANCE` (id ou nom) ; si vide et qu'une
+> seule instance existe, elle est choisie automatiquement ; si plusieurs, une erreur liste
+> les instances disponibles.
+
+| Tool | Type | Description |
+|---|---|---|
+| `qbit_list_instances` | read | Instances qBittorrent gérées par qui (id + nom) |
+| `qbit_list_torrents(filter=None)` | read | Torrents de l'instance (nom, hash complet, état, %, taille, ratio, catégorie) ; `filter` = recherche libre (matche aussi le hash) |
+| `qbit_get_torrent(hash)` | read | Détail d'un torrent par hash ou préfixe unique (pont avec le `downloadId` Sonarr/Radarr, insensible à la casse) |
+| `qbit_pause(hash)` | control | Met un torrent en pause (réversible, pas de confirm) |
+| `qbit_resume(hash)` | control | Reprend un torrent (réversible, pas de confirm) |
+| `qbit_delete_torrent(hash, delete_files=False, confirm=False)` | destructive | Retire un torrent de qBittorrent, avec option suppression des fichiers |
+
+Les tools prenant un `hash` acceptent le **hash complet (40 car., copiable depuis
+`qbit_list_torrents`)** ou un **préfixe unique** ; un préfixe ambigu liste les candidats sans
+agir.
+
+Le **hash** qBittorrent est la clé de liaison : c'est la valeur renvoyée par le `downloadId`
+de l'historique Sonarr/Radarr. La comparaison est insensible à la casse (qBit renvoie le
+hash en minuscules, les *arr souvent en majuscules).
 
 ### Pattern dry-run / confirm
 
@@ -162,9 +193,11 @@ src/media_mcp/
     base.py          # ArrClient: httpx async, gestion des erreurs
     sonarr.py        # SonarrClient(ArrClient)
     radarr.py        # RadarrClient(ArrClient)
+    qui.py           # QuiClient: httpx async, header X-API-Key (NE dérive PAS d'ArrClient)
   tools/
     sonarr_tools.py  # @mcp.tool pour Sonarr
     radarr_tools.py  # @mcp.tool pour Radarr
+    qbit_tools.py    # @mcp.tool pour qBittorrent via qui
 ```
 
 Ajouter un nouveau service (ex. Jellyseerr) : créer `clients/jellyseerr.py` et
