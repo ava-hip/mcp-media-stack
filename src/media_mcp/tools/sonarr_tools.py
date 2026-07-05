@@ -6,7 +6,9 @@ from media_mcp.clients.base import ArrClientError
 from media_mcp.clients.sonarr import SonarrClient
 from media_mcp.config import settings
 from media_mcp.models import (
+    HARDLINK_NOTE,
     CalendarEpisode,
+    EpisodeFileSummary,
     QualityProfile,
     QueueItem,
     RootFolder,
@@ -14,6 +16,7 @@ from media_mcp.models import (
     SeriesLookupResult,
     SeriesSummary,
     SystemStatus,
+    format_size,
 )
 
 
@@ -368,3 +371,104 @@ def register_sonarr_tools(mcp: FastMCP) -> None:
             return f"Error: {e}"
 
         return f"Season search launched for season {season_number} of '{title}'."
+
+    @mcp.tool()
+    async def sonarr_delete_season(
+        series_id: int,
+        season_number: int,
+        confirm: bool = False,
+    ) -> str:
+        """Delete ALL episode files of a single season (destructive).
+
+        Set confirm=True to actually delete; omit or set False for a dry-run preview.
+        Handles one season per call. Note: files are removed from Sonarr only —
+        hardlinked files are not freed on disk until the torrent is removed too.
+        """
+        try:
+            async with _client() as c:
+                series = await c.get_series_by_id(series_id)
+                title = series.get("title", series_id)
+                files_raw = await c.list_episode_files(series_id)
+                files = [
+                    EpisodeFileSummary(
+                        id=f["id"],
+                        season_number=f.get("seasonNumber", -1),
+                        relative_path=f.get("relativePath", ""),
+                        size=f.get("size", 0),
+                    )
+                    for f in files_raw
+                    if f.get("seasonNumber") == season_number
+                ]
+
+                if not files:
+                    return f"No episode files found for season {season_number} of '{title}'."
+
+                total_size = sum(f.size for f in files)
+                if not confirm:
+                    return (
+                        f"DRY-RUN: Would delete {len(files)} episode file(s) from "
+                        f"season {season_number} of '{title}' — {format_size(total_size)} total.\n"
+                        f"{HARDLINK_NOTE}\n"
+                        "Set confirm=True to proceed."
+                    )
+
+                deleted = 0
+                freed = 0
+                failed = 0
+                for f in files:
+                    try:
+                        await c.delete_episode_file(f.id)
+                        deleted += 1
+                        freed += f.size
+                    except ArrClientError:
+                        failed += 1
+        except ArrClientError as e:
+            if "404" in str(e):
+                return f"Error: series not found (id={series_id})."
+            return f"Error: {e}"
+
+        summary = (
+            f"Deleted {deleted}/{len(files)} episode file(s) from season {season_number} "
+            f"of '{title}' — {format_size(freed)} freed in Sonarr."
+        )
+        if failed:
+            summary += f" {failed} file(s) failed."
+        return summary
+
+    @mcp.tool()
+    async def sonarr_delete_episode_file(
+        episode_file_id: int,
+        confirm: bool = False,
+    ) -> str:
+        """Delete a single episode file by its id (destructive).
+
+        Set confirm=True to actually delete; omit or set False for a dry-run preview.
+        Note: files are removed from Sonarr only — hardlinked files are not freed on
+        disk until the torrent is removed too.
+        """
+        try:
+            async with _client() as c:
+                data = await c.get_episode_file(episode_file_id)
+                file = EpisodeFileSummary(
+                    id=data["id"],
+                    season_number=data.get("seasonNumber", -1),
+                    relative_path=data.get("relativePath", ""),
+                    size=data.get("size", 0),
+                )
+                if not confirm:
+                    return (
+                        f"DRY-RUN: Would delete episode file id={episode_file_id} "
+                        f"'{file.relative_path}' — {format_size(file.size)}.\n"
+                        f"{HARDLINK_NOTE}\n"
+                        "Set confirm=True to proceed."
+                    )
+                await c.delete_episode_file(episode_file_id)
+        except ArrClientError as e:
+            if "404" in str(e):
+                return f"Error: episode file not found (id={episode_file_id})."
+            return f"Error: {e}"
+
+        return (
+            f"Deleted episode file id={episode_file_id} '{file.relative_path}' — "
+            f"{format_size(file.size)} freed in Sonarr."
+        )

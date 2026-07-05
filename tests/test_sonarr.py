@@ -216,3 +216,120 @@ async def test_search_season_confirm_posts_command(monkeypatch):
     body = json.loads(command_route.calls.last.request.content)
     assert body == {"name": "SeasonSearch", "seriesId": 7, "seasonNumber": 2}
     assert "launched" in result.lower()
+
+
+GIB = 1_073_741_824
+
+
+def _ep_file(file_id: int, season: int, size: int) -> dict:
+    return {
+        "id": file_id,
+        "seriesId": 7,
+        "seasonNumber": season,
+        "relativePath": f"S{season:02d}/e{file_id:02d}.mkv",
+        "size": size,
+    }
+
+
+def _episode_files() -> list[dict]:
+    # Season 1: 2 files (1 GB each); Season 2: 3 files (2 GB each).
+    return [
+        _ep_file(11, 1, GIB),
+        _ep_file(12, 1, GIB),
+        _ep_file(21, 2, 2 * GIB),
+        _ep_file(22, 2, 2 * GIB),
+        _ep_file(23, 2, 2 * GIB),
+    ]
+
+
+@respx.mock
+async def test_delete_season_dry_run(monkeypatch):
+    respx.get(f"{BASE}/series/7").mock(return_value=Response(200, json=_series_with_seasons()))
+    respx.get(f"{BASE}/episodefile").mock(return_value=Response(200, json=_episode_files()))
+    delete_route = respx.delete(url__regex=rf"{BASE}/episodefile/\d+").mock(
+        return_value=Response(200, json={})
+    )
+
+    fn = _seasons_tool("sonarr_delete_season", monkeypatch)
+    result = await fn(series_id=7, season_number=2, confirm=False)
+
+    assert not delete_route.called
+    assert "DRY-RUN" in result
+    # Only season 2's 3 files (6 GB total), not season 1.
+    assert "3 episode file(s)" in result
+    assert "6.0 GB" in result
+    assert "hardlinked" in result.lower()
+
+
+@respx.mock
+async def test_delete_season_confirm_deletes_only_target(monkeypatch):
+    respx.get(f"{BASE}/series/7").mock(return_value=Response(200, json=_series_with_seasons()))
+    respx.get(f"{BASE}/episodefile").mock(return_value=Response(200, json=_episode_files()))
+    delete_route = respx.delete(url__regex=rf"{BASE}/episodefile/\d+").mock(
+        return_value=Response(200, json={})
+    )
+
+    fn = _seasons_tool("sonarr_delete_season", monkeypatch)
+    result = await fn(series_id=7, season_number=2, confirm=True)
+
+    deleted_ids = {int(call.request.url.path.rsplit("/", 1)[1]) for call in delete_route.calls}
+    # Exactly season 2's files, none from season 1.
+    assert deleted_ids == {21, 22, 23}
+    assert "3/3" in result
+    assert "6.0 GB" in result
+
+
+@respx.mock
+async def test_delete_season_no_files(monkeypatch):
+    respx.get(f"{BASE}/series/7").mock(return_value=Response(200, json=_series_with_seasons()))
+    respx.get(f"{BASE}/episodefile").mock(return_value=Response(200, json=_episode_files()))
+    delete_route = respx.delete(url__regex=rf"{BASE}/episodefile/\d+").mock(
+        return_value=Response(200, json={})
+    )
+
+    fn = _seasons_tool("sonarr_delete_season", monkeypatch)
+    result = await fn(series_id=7, season_number=5, confirm=True)
+
+    assert not delete_route.called
+    assert "no episode files found for season 5" in result.lower()
+
+
+@respx.mock
+async def test_delete_season_series_not_found(monkeypatch):
+    respx.get(f"{BASE}/series/99").mock(return_value=Response(404, text="Not Found"))
+
+    fn = _seasons_tool("sonarr_delete_season", monkeypatch)
+    result = await fn(series_id=99, season_number=1, confirm=True)
+
+    assert "series not found" in result.lower()
+
+
+@respx.mock
+async def test_delete_episode_file_dry_run(monkeypatch):
+    respx.get(f"{BASE}/episodefile/21").mock(
+        return_value=Response(200, json=_ep_file(21, 2, 2 * GIB))
+    )
+    delete_route = respx.delete(f"{BASE}/episodefile/21").mock(return_value=Response(200, json={}))
+
+    fn = _seasons_tool("sonarr_delete_episode_file", monkeypatch)
+    result = await fn(episode_file_id=21, confirm=False)
+
+    assert not delete_route.called
+    assert "DRY-RUN" in result
+    assert "S02/e21.mkv" in result
+    assert "2.0 GB" in result
+    assert "hardlinked" in result.lower()
+
+
+@respx.mock
+async def test_delete_episode_file_confirm(monkeypatch):
+    respx.get(f"{BASE}/episodefile/21").mock(
+        return_value=Response(200, json=_ep_file(21, 2, 2 * GIB))
+    )
+    delete_route = respx.delete(f"{BASE}/episodefile/21").mock(return_value=Response(200, json={}))
+
+    fn = _seasons_tool("sonarr_delete_episode_file", monkeypatch)
+    result = await fn(episode_file_id=21, confirm=True)
+
+    assert delete_route.called
+    assert "freed" in result.lower()

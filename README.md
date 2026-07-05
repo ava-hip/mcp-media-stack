@@ -79,6 +79,8 @@ Remplacer `/chemin/absolu/media-mcp` par le chemin réel du projet.
 | `sonarr_add_series(tvdb_id, quality_profile_id, root_folder_path, confirm=False)` | write | Ajoute une série |
 | `sonarr_set_season_monitoring(series_id, season_number, monitored)` | write | (Dé)monitore une saison précise |
 | `sonarr_search_season(series_id, season_number, confirm=False)` | write | Lance la recherche d'une saison |
+| `sonarr_delete_season(series_id, season_number, confirm=False)` | destructive | Supprime tous les fichiers d'une saison |
+| `sonarr_delete_episode_file(episode_file_id, confirm=False)` | destructive | Supprime un fichier d'épisode |
 | `sonarr_delete_series(series_id, delete_files=False, confirm=False)` | destructive | Supprime une série |
 
 ### Radarr
@@ -95,9 +97,14 @@ Remplacer `/chemin/absolu/media-mcp` par le chemin réel du projet.
 
 ### Pattern dry-run / confirm
 
-Toutes les actions à effet de bord (`add_*`, `delete_*`) acceptent un paramètre `confirm`:
+Toutes les actions à effet de bord (`add_*`, `delete_*`, `search_*`) acceptent un paramètre `confirm`:
 - `confirm=False` (défaut) → aperçu sans exécution (dry-run)
 - `confirm=True` → exécution réelle
+
+> **Note hardlink** : les tools `sonarr_delete_season` / `sonarr_delete_episode_file`
+> retirent les fichiers côté Sonarr uniquement. Si les fichiers sont en hardlink avec
+> un client torrent, l'espace disque n'est **pas** libéré tant que le torrent n'est pas
+> aussi supprimé côté client. L'aperçu dry-run le rappelle.
 
 ## Développement
 

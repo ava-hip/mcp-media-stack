@@ -1,5 +1,21 @@
 from pydantic import BaseModel
 
+# Static reminder shown in delete previews: Sonarr only removes its own record/file,
+# so hardlinked files keep occupying disk until the torrent is removed in the client too.
+HARDLINK_NOTE = (
+    "Note: files are removed from Sonarr only. If hardlinked to a torrent client, "
+    "disk space is NOT freed until the torrent is also removed there."
+)
+
+
+def format_size(num_bytes: int) -> str:
+    """Format a byte count as a human-readable string (base 1024), e.g. '18.4 GB'."""
+    gib = 1_073_741_824
+    mib = 1_048_576
+    if num_bytes >= gib:
+        return f"{num_bytes / gib:.1f} GB"
+    return f"{num_bytes / mib:.1f} MB"
+
 
 class SystemStatus(BaseModel):
     app_name: str
@@ -47,6 +63,13 @@ class SeasonSummary(BaseModel):
     total_episode_count: int
     is_complete: bool
     is_specials: bool
+
+
+class EpisodeFileSummary(BaseModel):
+    id: int
+    season_number: int
+    relative_path: str
+    size: int
 
 
 class SeriesLookupResult(BaseModel):
