@@ -79,7 +79,7 @@ Remplacer `/chemin/absolu/media-mcp` par le chemin réel du projet.
 | `sonarr_lookup_series(term)` | read | Recherche une série (pour ajout) |
 | `sonarr_quality_profiles` | read | Profils de qualité disponibles |
 | `sonarr_root_folders` | read | Dossiers racine configurés |
-| `sonarr_queue` | read | File de téléchargement en cours (avec l'ID de chaque élément) |
+| `sonarr_queue` | read | File de téléchargement + **diagnostic** des items bloqués (voir ci-dessous) |
 | `sonarr_disk_space` | read | Espace disque par volume, le plus plein en premier |
 | `sonarr_health` | read | Avertissements de santé de l'instance |
 | `sonarr_history(limit=20, event_type=None)` | read | Événements récents (grab/import/…) avec downloadId ; filtre `event_type` optionnel (voir ci-dessous) |
@@ -101,7 +101,7 @@ Remplacer `/chemin/absolu/media-mcp` par le chemin réel du projet.
 | `radarr_lookup_movie(term)` | read | Recherche un film (pour ajout) |
 | `radarr_quality_profiles` | read | Profils de qualité disponibles |
 | `radarr_root_folders` | read | Dossiers racine configurés |
-| `radarr_queue` | read | File de téléchargement en cours (avec l'ID de chaque élément) |
+| `radarr_queue` | read | File de téléchargement + **diagnostic** des items bloqués (voir Sonarr) |
 | `radarr_disk_space` | read | Espace disque par volume, le plus plein en premier |
 | `radarr_health` | read | Avertissements de santé de l'instance |
 | `radarr_history(limit=20, event_type=None)` | read | Événements récents (grab/import/…) avec downloadId ; filtre `event_type` optionnel (voir ci-dessous) |
@@ -202,6 +202,17 @@ Une valeur inconnue renvoie un message listant les valeurs valides, sans appel A
 Comme le filtrage est côté client sur une fenêtre élargie (une requête,
 `pageSize = max(limit*5, 100)`), un résultat filtré partiel ajoute une note
 `showing N of up to {limit} (searched the {window} most recent events)`.
+
+### Diagnostic & regroupement de `*_queue`
+
+`sonarr_queue` / `radarr_queue` surfacent, pour chaque item, **pourquoi il est bloqué** :
+`trackedDownloadStatus` / `trackedDownloadState` (ex. `warning` / `importBlocked`), le texte
+des `statusMessages` et l'`errorMessage` éventuel. Les messages par item sont bornés
+(`(+N more)`) pour rester lisibles ; un champ absent/`null` est géré sans erreur.
+
+Les items partageant le **même `downloadId`** (un season pack = un torrent, N lignes) sont
+**regroupés** en une entrée `[×N]` affichant le `downloadId` (le pont vers qBittorrent). Les
+items sans `downloadId` restent individuels et conservent taille/ETA.
 
 ## Développement
 

@@ -13,12 +13,12 @@ from media_mcp.models import (
     HealthIssue,
     HistoryRecordSummary,
     QualityProfile,
-    QueueItem,
     RootFolder,
     SeasonSummary,
     SeriesLookupResult,
     SeriesSummary,
     SystemStatus,
+    format_queue,
     format_size,
     hardlink_note,
 )
@@ -150,33 +150,17 @@ def register_sonarr_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def sonarr_queue() -> str:
-        """Show current download queue in Sonarr."""
+        """Show current download queue in Sonarr, with diagnostics for stuck items.
+
+        Surfaces trackedDownloadStatus/State and statusMessages/errorMessage (the "why"),
+        and groups items sharing a downloadId (a season pack is one torrent, many rows).
+        """
         try:
             async with _client() as c:
                 data = await c.get_queue()
-            records = data.get("records", [])
-            if not records:
-                return "Download queue is empty."
-            items = [
-                QueueItem(
-                    id=r["id"],
-                    title=r.get("title", ""),
-                    status=r.get("status", ""),
-                    size_mb=round(r.get("size", 0) / 1_048_576, 1),
-                    sizeleft_mb=round(r.get("sizeleft", 0) / 1_048_576, 1),
-                    time_left=r.get("timeleft"),
-                )
-                for r in records
-            ]
-            lines = [f"Queue ({len(items)} items):"]
-            for i in items:
-                lines.append(
-                    f"  [{i.id}] {i.title[:60]}  status={i.status}  "
-                    f"{i.sizeleft_mb}/{i.size_mb} MB  ETA={i.time_left or 'unknown'}"
-                )
-            return "\n".join(lines)
         except ArrClientError as e:
             return f"Error: {e}"
+        return format_queue(data.get("records") or [])
 
     @mcp.tool()
     async def sonarr_disk_space() -> str:

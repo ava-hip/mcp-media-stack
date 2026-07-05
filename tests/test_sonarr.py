@@ -600,3 +600,107 @@ async def test_delete_queue_item_confirm_passes_query_params(monkeypatch):
     assert params["removeFromClient"] == "true"
     assert params["blocklist"] == "true"
     assert "Removed queue item [77]" in result
+
+
+# ── Queue diagnostics + grouping ──────────────────────────────────────────────
+
+
+def _queue_record(rec_id, title, download_id=None, **over):
+    r = {
+        "id": rec_id,
+        "title": title,
+        "status": "downloading",
+        "size": 100 * 1_048_576,
+        "sizeleft": 50 * 1_048_576,
+        "timeleft": "00:10:00",
+        "downloadId": download_id,
+    }
+    r.update(over)
+    return r
+
+
+@respx.mock
+async def test_queue_import_blocked_shows_diagnostic(monkeypatch):
+    rec = _queue_record(
+        1,
+        "Lost.S06.MULTI.1080p",
+        download_id="FBB6",
+        status="completed",
+        trackedDownloadStatus="warning",
+        trackedDownloadState="importBlocked",
+        statusMessages=[
+            {"title": "One or more episodes expected were not imported", "messages": []},
+            {"title": "S06E01.mkv", "messages": ["Episode file already imported at X"]},
+        ],
+        errorMessage=None,
+    )
+    respx.get(f"{BASE}/queue").mock(return_value=Response(200, json={"records": [rec]}))
+
+    fn = _seasons_tool("sonarr_queue", monkeypatch)
+    result = await fn()
+
+    assert "tracked: warning/importBlocked" in result
+    assert "One or more episodes expected were not imported" in result
+    assert "Episode file already imported at X" in result
+    assert "downloadId=FBB6" in result
+
+
+@respx.mock
+async def test_queue_item_without_status_messages(monkeypatch):
+    # No trackedDownload* and no statusMessages -> clean output, no exception.
+    rec = _queue_record(7, "Simple.Show.S01E01")
+    respx.get(f"{BASE}/queue").mock(return_value=Response(200, json={"records": [rec]}))
+
+    fn = _seasons_tool("sonarr_queue", monkeypatch)
+    result = await fn()
+
+    assert "[7] Simple.Show.S01E01" in result
+    assert "50.0/100.0 MB" in result
+    assert "ETA=00:10:00" in result
+    assert "tracked:" not in result
+    assert "•" not in result
+
+
+@respx.mock
+async def test_queue_groups_shared_download_id(monkeypatch):
+    # A season pack: 3 rows sharing one downloadId -> one grouped entry "×3".
+    records = [
+        _queue_record(i, "Pack.S06.MULTI", download_id="SEASONPACK")
+        for i in (1, 2, 3)
+    ]
+    respx.get(f"{BASE}/queue").mock(return_value=Response(200, json={"records": records}))
+
+    fn = _seasons_tool("sonarr_queue", monkeypatch)
+    result = await fn()
+
+    assert "3 item(s) in 1 group(s)" in result
+    assert "[×3] Pack.S06.MULTI" in result
+    assert "downloadId=SEASONPACK" in result
+
+
+@respx.mock
+async def test_queue_simple_no_regression(monkeypatch):
+    # Distinct downloadIds -> individual lines with size/ETA as before.
+    records = [
+        _queue_record(1, "Show.A", download_id="AAA"),
+        _queue_record(2, "Show.B", download_id="BBB"),
+    ]
+    respx.get(f"{BASE}/queue").mock(return_value=Response(200, json={"records": records}))
+
+    fn = _seasons_tool("sonarr_queue", monkeypatch)
+    result = await fn()
+
+    assert "2 item(s) in 2 group(s)" in result
+    assert "[1] Show.A" in result
+    assert "[2] Show.B" in result
+    assert "50.0/100.0 MB" in result
+
+
+@respx.mock
+async def test_queue_empty_message(monkeypatch):
+    respx.get(f"{BASE}/queue").mock(return_value=Response(200, json={"records": []}))
+
+    fn = _seasons_tool("sonarr_queue", monkeypatch)
+    result = await fn()
+
+    assert result == "Download queue is empty."

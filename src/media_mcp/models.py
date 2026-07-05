@@ -57,6 +57,99 @@ class QueueItem(BaseModel):
     size_mb: float
     sizeleft_mb: float
     time_left: str | None
+    download_id: str | None = None
+    tracked_status: str | None = None  # trackedDownloadStatus (ok/warning/error)
+    tracked_state: str | None = None  # trackedDownloadState (e.g. importBlocked)
+    status_messages: list[str] = []  # flattened statusMessages ("why is it stuck")
+    error_message: str | None = None
+
+
+# Cap the per-item diagnostic lines so a season pack's per-episode messages stay readable.
+_MAX_DIAG_LINES = 4
+
+
+def _flatten_status_messages(status_messages: list[dict] | None) -> list[str]:
+    """Flatten Sonarr/Radarr statusMessages [{title, messages[]}] into readable strings.
+
+    Tolerates a null/absent field and empty message arrays.
+    """
+    out: list[str] = []
+    for sm in status_messages or []:
+        title = (sm.get("title") or "").strip()
+        msgs = [m for m in (sm.get("messages") or []) if m]
+        if msgs:
+            out.append(f"{title}: {'; '.join(msgs)}" if title else "; ".join(msgs))
+        elif title:
+            out.append(title)
+    return out
+
+
+def queue_item_from_record(r: dict) -> "QueueItem":
+    return QueueItem(
+        id=r["id"],
+        title=r.get("title", ""),
+        status=r.get("status", ""),
+        size_mb=round(r.get("size", 0) / 1_048_576, 1),
+        sizeleft_mb=round(r.get("sizeleft", 0) / 1_048_576, 1),
+        time_left=r.get("timeleft"),
+        download_id=r.get("downloadId"),
+        tracked_status=r.get("trackedDownloadStatus"),
+        tracked_state=r.get("trackedDownloadState"),
+        status_messages=_flatten_status_messages(r.get("statusMessages")),
+        error_message=r.get("errorMessage"),
+    )
+
+
+def _diagnostic_lines(item: "QueueItem") -> list[str]:
+    out: list[str] = []
+    if item.tracked_status or item.tracked_state:
+        state = "/".join(x for x in (item.tracked_status, item.tracked_state) if x)
+        out.append(f"      tracked: {state}")
+    if item.error_message:
+        out.append(f"      ! {item.error_message}")
+    shown = item.status_messages[:_MAX_DIAG_LINES]
+    out.extend(f"      • {line}" for line in shown)
+    extra = len(item.status_messages) - len(shown)
+    if extra > 0:
+        out.append(f"      (+{extra} more)")
+    return out
+
+
+def format_queue(records: list[dict]) -> str:
+    """Render a download queue, grouping items that share a downloadId (season pack =
+    one torrent, many rows) and surfacing the diagnostic fields (why an item is stuck).
+    """
+    if not records:
+        return "Download queue is empty."
+    items = [queue_item_from_record(r) for r in records]
+
+    order: list[str] = []
+    groups: dict[str, list[QueueItem]] = {}
+    for it in items:
+        key = it.download_id or f"__id{it.id}"
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(it)
+
+    lines = [f"Queue ({len(items)} item(s) in {len(order)} group(s)):"]
+    for key in order:
+        grp = groups[key]
+        head = grp[0]
+        if len(grp) == 1:
+            tag = f"[{head.id}]"
+            # Per-item sizes vary within a pack, so only show size/ETA for singletons.
+            size_part = (
+                f"  {head.sizeleft_mb}/{head.size_mb} MB  ETA={head.time_left or 'unknown'}"
+            )
+        else:
+            tag = f"[×{len(grp)}]"
+            size_part = ""
+        lines.append(f"  {tag} {head.title[:60]}  status={head.status}{size_part}")
+        if head.download_id:
+            lines.append(f"      downloadId={head.download_id}")
+        lines.extend(_diagnostic_lines(head))
+    return "\n".join(lines)
 
 
 class DiskSpaceSummary(BaseModel):

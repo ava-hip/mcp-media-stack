@@ -388,3 +388,39 @@ async def test_delete_queue_item_smoke(monkeypatch):
     assert params["removeFromClient"] == "true"
     assert params["blocklist"] == "false"
     assert "Removed queue item [88]" in result
+
+
+@respx.mock
+async def test_queue_diagnostic_and_grouping_smoke(monkeypatch):
+    def rec(rec_id, dlid, **over):
+        r = {
+            "id": rec_id,
+            "title": "Movie.2021.1080p",
+            "status": "warning",
+            "size": 100 * GIB,
+            "sizeleft": 0,
+            "timeleft": None,
+            "downloadId": dlid,
+        }
+        r.update(over)
+        return r
+
+    records = [
+        rec(
+            1,
+            "SAME",
+            trackedDownloadStatus="warning",
+            trackedDownloadState="importBlocked",
+            statusMessages=[{"title": "No files found are eligible for import", "messages": []}],
+        ),
+        rec(2, "SAME"),
+    ]
+    respx.get(f"{BASE}/queue").mock(return_value=Response(200, json={"records": records}))
+
+    fn = _radarr_tool("radarr_queue", monkeypatch)
+    result = await fn()
+
+    assert "[×2]" in result
+    assert "downloadId=SAME" in result
+    assert "tracked: warning/importBlocked" in result
+    assert "No files found are eligible for import" in result
