@@ -175,6 +175,38 @@ async def test_list_torrents_empty(monkeypatch):
     assert "nope" in result
 
 
+@respx.mock
+async def test_list_torrents_null_torrents_field(monkeypatch):
+    # qui returns "torrents": null (not []) when a filter matches nothing.
+    respx.get(f"{BASE}/instances").mock(
+        return_value=Response(200, json=[_instance(1, "qbit")])
+    )
+    respx.get(f"{BASE}/instances/1/torrents").mock(
+        return_value=Response(200, json={"torrents": None, "total": None})
+    )
+
+    fn = _qbit_tool("qbit_list_torrents", monkeypatch)
+    # Must NOT raise "'NoneType' object is not iterable".
+    result = await fn(filter="nomatch")
+
+    assert "no torrents found" in result.lower()
+    assert "nomatch" in result
+
+
+@respx.mock
+async def test_list_torrents_http_error_still_surfaces(monkeypatch):
+    # The or-[] normalization must not swallow real errors.
+    respx.get(f"{BASE}/instances").mock(
+        return_value=Response(200, json=[_instance(1, "qbit")])
+    )
+    respx.get(f"{BASE}/instances/1/torrents").mock(return_value=Response(401, text="nope"))
+
+    fn = _qbit_tool("qbit_list_torrents", monkeypatch)
+    result = await fn()
+
+    assert result.lower().startswith("error")
+
+
 # ── resolve_torrent (full hash + prefix) ──────────────────────────────────────
 
 
@@ -238,6 +270,26 @@ async def test_resolve_torrent_unknown(client):
     )
     with pytest.raises(QuiClientError, match="No torrent found with hash 'zzz'"):
         await client.resolve_torrent(1, "zzz")
+
+
+@respx.mock
+async def test_resolve_torrent_null_torrents_field(client):
+    # "torrents": null must be treated as no match, not crash.
+    _mock_instances()
+    respx.get(f"{BASE}/instances/1/torrents").mock(
+        return_value=Response(200, json={"torrents": None})
+    )
+    with pytest.raises(QuiClientError, match="No torrent found with hash 'abc'"):
+        await client.resolve_torrent(1, "abc")
+
+
+@respx.mock
+async def test_local_matches_null_treated_as_empty(client):
+    respx.get(f"{BASE}/cross-seed/torrents/1/deadbeef/local-matches").mock(
+        return_value=Response(200, json={"matches": None})
+    )
+    matches = await client.local_matches(1, "deadbeef")
+    assert matches == []
 
 
 @respx.mock

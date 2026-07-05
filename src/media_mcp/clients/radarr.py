@@ -28,6 +28,12 @@ class RadarrClient(ArrClient):
         """Delete a single movie file (from disk + Radarr database)."""
         await self._delete(f"/moviefile/{file_id}")
 
+    async def history_movie(self, movie_id: int) -> list[dict[str, Any]]:
+        """Return history events for a movie (grab/import/...), including the downloadId
+        (the origin torrent hash) on grab and import events.
+        """
+        return await self._get("/history/movie", movieId=movie_id)
+
     async def get_calendar(self, start: str, end: str) -> list[dict[str, Any]]:
         return await self._get("/calendar", start=start, end=end)
 

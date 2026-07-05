@@ -48,6 +48,16 @@ class SonarrClient(ArrClient):
         """Delete a single episode file (from disk + Sonarr database)."""
         await self._delete(f"/episodefile/{file_id}")
 
+    async def history_series(
+        self, series_id: int, season_number: int
+    ) -> list[dict[str, Any]]:
+        """Return history events for a whole season (grab/import/...), including the
+        downloadId (the origin torrent hash) on grab and import events.
+        """
+        return await self._get(
+            "/history/series", seriesId=series_id, seasonNumber=season_number
+        )
+
     async def get_calendar(self, start: str, end: str) -> list[dict[str, Any]]:
         return await self._get("/calendar", start=start, end=end)
 

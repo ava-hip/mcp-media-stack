@@ -132,7 +132,8 @@ class QuiClient:
         """
         wanted = value.strip().lower()
         data = await self.list_torrents(instance_id, search=value)
-        torrents = data.get("torrents", [])
+        # qui returns "torrents": null (not []) when nothing matches; normalize.
+        torrents = data.get("torrents") or []
 
         for t in torrents:
             if str(t.get("hash", "")).lower() == wanted:
@@ -152,6 +153,22 @@ class QuiClient:
             f"Ambiguous hash prefix '{value}' matches {len(prefix_matches)} torrents: "
             f"{candidates}. Provide a longer prefix or the full hash."
         )
+
+    async def local_matches(
+        self, instance_id: int, torrent_hash: str, strict: bool = True
+    ) -> list[dict[str, Any]]:
+        """Return the local cross-seed siblings of a torrent (same content, other hashes).
+
+        Does NOT include the origin torrent itself. Each match carries a `match_type`
+        (content_path | name | release). Raises QuiClientError if the cross-seed feature
+        is unavailable — callers may treat that as "no siblings known".
+        """
+        data = await self._get(
+            f"/cross-seed/torrents/{instance_id}/{torrent_hash}/local-matches",
+            strict=str(strict).lower(),
+        )
+        # "matches" can be null when there are no siblings; treat as empty.
+        return data.get("matches") or []
 
     async def bulk_action(
         self,

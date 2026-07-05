@@ -5,6 +5,7 @@ from mcp.server.fastmcp import FastMCP
 from media_mcp.clients.base import ArrClientError
 from media_mcp.clients.sonarr import SonarrClient
 from media_mcp.config import settings
+from media_mcp.coordinated import delete_each
 from media_mcp.models import (
     CalendarEpisode,
     DiskSpaceSummary,
@@ -560,16 +561,7 @@ def register_sonarr_tools(mcp: FastMCP) -> None:
                         "Set confirm=True to proceed."
                     )
 
-                deleted = 0
-                freed = 0
-                failed = 0
-                for f in files:
-                    try:
-                        await c.delete_episode_file(f.id)
-                        deleted += 1
-                        freed += f.size
-                    except ArrClientError:
-                        failed += 1
+                deleted, freed, failed = await delete_each(c.delete_episode_file, files)
         except ArrClientError as e:
             if "404" in str(e):
                 return f"Error: series not found (id={series_id})."

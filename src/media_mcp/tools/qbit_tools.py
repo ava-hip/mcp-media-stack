@@ -65,11 +65,12 @@ def register_qbit_tools(mcp: FastMCP) -> None:
                 data = await c.list_torrents(instance_id, search=filter)
         except QuiClientError as e:
             return f"Error: {e}"
-        torrents = [_summary(t) for t in data.get("torrents", [])]
+        torrents = [_summary(t) for t in (data.get("torrents") or [])]
         if not torrents:
-            suffix = f" matching '{filter}'" if filter else ""
+            suffix = f" (filter='{filter}')" if filter else ""
             return f"No torrents found{suffix}."
-        header = f"Torrents ({len(torrents)} shown, {data.get('total', len(torrents))} total):"
+        total = data.get("total") or len(torrents)
+        header = f"Torrents ({len(torrents)} shown, {total} total):"
         lines = [header]
         lines.extend(_torrent_line(t) for t in torrents)
         return "\n".join(lines)

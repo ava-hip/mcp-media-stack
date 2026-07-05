@@ -138,6 +138,39 @@ Le **hash** qBittorrent est la clé de liaison : c'est la valeur renvoyée par l
 de l'historique Sonarr/Radarr. La comparaison est insensible à la casse (qBit renvoie le
 hash en minuscules, les *arr souvent en majuscules).
 
+### Tools coordonnés — purge « partout »
+
+Suppriment, en un geste avec aperçu et `confirm`, **les fichiers bibliothèque (Sonarr/Radarr)
+ET le(s) torrent(s) correspondants côté qBittorrent-via-qui, cross-seeds inclus**.
+
+| Tool | Type | Description |
+|---|---|---|
+| `sonarr_purge_season(series_id, season_number, delete_torrent_files=True, include_loose_matches=True, confirm=False)` | destructive | Purge une saison partout (fichiers Sonarr + torrents + cross-seeds) |
+| `radarr_purge_movie(movie_id, delete_torrent_files=True, include_loose_matches=True, confirm=False)` | destructive | Purge un film partout (fichier Radarr + torrents + cross-seeds) |
+
+**Flux** :
+1. Lister les fichiers concernés côté *arr (saison / film) → nombre + taille.
+2. Extraire les `downloadId` depuis l'historique *arr (`/history/series`, `/history/movie`) →
+   ensemble des **hash d'origine** (dédupliqués ; un season pack partage un seul `downloadId`).
+3. Côté qui, pour chaque origine : résoudre le torrent, puis
+   `local-matches?strict=true` → **cross-seeds (siblings)**.
+4. Ensemble à supprimer = origines présentes ∪ siblings, dédupliqué par hash.
+   `include_loose_matches=False` exclut les siblings `match_type ∈ {name, release}`
+   (garde les matches `content_path`) et indique combien ont été exclus.
+5. **Dry-run** (`confirm=False`) : aperçu **exhaustif des deux côtés**, rien supprimé.
+   **`confirm=True`** : suppression des fichiers *arr **puis** un **seul** `bulk-action delete`
+   (avec `deleteFiles` selon `delete_torrent_files`) sur tous les hash ; rapport combiné.
+
+**Cas limites gérés** (sans planter) : aucun `downloadId` (historique purgé → suppression
+biblio seule, torrents à gérer à la main) ; origine absente de qBit (ignorée, signalée) ;
+saison/film sans fichier (torrents traités quand même) ; cross-seed indispo (repli sur les
+origines seules).
+
+> **Honnêteté sur l'espace disque** : les tailles bibliothèque et torrents ne sont **jamais
+> additionnées** — hardlinkées, ce sont généralement les **mêmes octets**. L'aperçu les montre
+> séparément et rappelle que, comme on supprime les **deux** côtés (+ cross-seeds), l'espace de
+> ce contenu sera cette fois **réellement** libéré (≈ la plus grande des deux tailles, pas la somme).
+
 ### Pattern dry-run / confirm
 
 Toutes les actions à effet de bord (`add_*`, `delete_*`, `search_*`) acceptent un paramètre `confirm`:
@@ -187,6 +220,7 @@ uv run pytest
 src/media_mcp/
   config.py          # pydantic-settings — lit les variables d'env
   models.py          # modèles pydantic pour les réponses simplifiées
+  coordinated.py     # service d'orchestration purge (arr + qui), logique lourde
   server.py          # instancie FastMCP et enregistre tous les tools
   __main__.py        # entrypoint: python -m media_mcp
   clients/
@@ -198,6 +232,7 @@ src/media_mcp/
     sonarr_tools.py  # @mcp.tool pour Sonarr
     radarr_tools.py  # @mcp.tool pour Radarr
     qbit_tools.py    # @mcp.tool pour qBittorrent via qui
+    coordinated_tools.py  # @mcp.tool purge saison/film "partout" (arr + qui)
 ```
 
 Ajouter un nouveau service (ex. Jellyseerr) : créer `clients/jellyseerr.py` et

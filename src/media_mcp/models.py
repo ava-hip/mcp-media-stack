@@ -20,6 +20,20 @@ def torrent_hardlink_note() -> str:
     )
 
 
+# Disk-space honesty for the coordinated purge: library files and torrent files are
+# usually the SAME bytes (hardlinked), so their sizes must NOT be summed. Since the purge
+# removes BOTH sides (library + torrents + cross-seeds), the content's space is really
+# reclaimed this time — roughly one copy, not the sum.
+def purge_disk_note() -> str:
+    return (
+        "Disk space: the library files and the torrent files are usually the SAME bytes "
+        "(hardlinked), so the two sizes above must NOT be added together. Because this "
+        "purge removes BOTH the library files AND every torrent (cross-seeds included), "
+        "the space for this content will actually be reclaimed — roughly the larger of "
+        "the two sizes, not their sum."
+    )
+
+
 def format_size(num_bytes: int) -> str:
     """Format a byte count as a human-readable string (base 1024), e.g. '18.4 GB'."""
     gib = 1_073_741_824
@@ -81,6 +95,15 @@ class TorrentSummary(BaseModel):
     @property
     def progress_pct(self) -> int:
         return round(self.progress * 100)
+
+
+class QbitTarget(BaseModel):
+    name: str
+    hash: str
+    category: str
+    size: int
+    kind: str  # "origin" | "sibling"
+    match_type: str | None = None  # content_path | name | release (siblings only)
 
 
 class QualityProfile(BaseModel):
