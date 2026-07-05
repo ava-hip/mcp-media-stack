@@ -183,6 +183,47 @@ class ArrClient:
             blocklist=str(blocklist).lower(),
         )
 
+    async def bulk_delete_queue(
+        self,
+        ids: list[int],
+        remove_from_client: bool = True,
+        blocklist: bool = False,
+    ) -> None:
+        """Remove several queue items in one call (DELETE /queue/bulk, ids in the body)."""
+        try:
+            response = await self._client.request(
+                "DELETE",
+                f"{self._base}/queue/bulk",
+                params={
+                    "removeFromClient": str(remove_from_client).lower(),
+                    "blocklist": str(blocklist).lower(),
+                },
+                json={"ids": ids},
+            )
+            response.raise_for_status()
+        except httpx.TimeoutException as e:
+            raise ArrClientError("Request timed out: DELETE /queue/bulk") from e
+        except httpx.ConnectError as e:
+            raise ArrClientError(f"Cannot connect to service at {self._base}") from e
+        except httpx.HTTPStatusError as e:
+            raise ArrClientError(
+                f"HTTP {e.response.status_code} on DELETE /queue/bulk: {e.response.text}"
+            ) from e
+
+    async def queue_items_for_download(self, download_id: str) -> list[dict[str, Any]]:
+        """Return all queue items sharing a downloadId (case-insensitive).
+
+        A season pack is one torrent (one downloadId) spread over many queue rows;
+        this locates them all so they can be removed in one gesture.
+        """
+        wanted = download_id.strip().lower()
+        data = await self.get_queue(page_size=1000)
+        return [
+            r
+            for r in (data.get("records") or [])
+            if str(r.get("downloadId", "")).lower() == wanted
+        ]
+
     async def aclose(self) -> None:
         await self._client.aclose()
 

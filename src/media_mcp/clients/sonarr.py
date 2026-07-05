@@ -48,6 +48,16 @@ class SonarrClient(ArrClient):
         """Delete a single episode file (from disk + Sonarr database)."""
         await self._delete(f"/episodefile/{file_id}")
 
+    async def get_episodes(
+        self, series_id: int, season_number: int
+    ) -> list[dict[str, Any]]:
+        """Return the episodes of one season (id, episodeNumber, title, hasFile,
+        monitored, episodeFileId — 0 when no file).
+        """
+        return await self._get(
+            "/episode", seriesId=series_id, seasonNumber=season_number
+        )
+
     async def history_series(
         self, series_id: int, season_number: int
     ) -> list[dict[str, Any]]:

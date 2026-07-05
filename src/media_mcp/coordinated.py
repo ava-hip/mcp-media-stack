@@ -9,11 +9,102 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel
 
-from media_mcp.clients.base import ArrClientError
+from media_mcp.clients.base import ArrClient, ArrClientError
 from media_mcp.clients.qui import QuiClient, QuiClientError
-from media_mcp.models import QbitTarget, format_size, purge_disk_note
+from media_mcp.models import QbitTarget, format_ids, format_size, purge_disk_note
 
 LOOSE_MATCH_TYPES = {"name", "release"}
+
+
+def _queue_effects(remove_from_client: bool, blocklist: bool) -> tuple[str, str]:
+    client_note = (
+        "will be removed from the download client"
+        if remove_from_client
+        else "will be kept in the download client"
+    )
+    block_note = "will be blocklisted" if blocklist else "will NOT be blocklisted"
+    return client_note, block_note
+
+
+def _removed_suffix(remove_from_client: bool, blocklist: bool) -> str:
+    extras = []
+    if remove_from_client:
+        extras.append("removed from download client")
+    if blocklist:
+        extras.append("blocklisted")
+    return f" ({', '.join(extras)})" if extras else ""
+
+
+async def run_delete_queue(
+    client: ArrClient,
+    service_name: str,
+    *,
+    queue_id: int | None,
+    download_id: str | None,
+    remove_from_client: bool,
+    blocklist: bool,
+    confirm: bool,
+) -> str:
+    """Remove one queue item (by id) or every item sharing a downloadId (season pack).
+
+    Shared by the Sonarr and Radarr tools; the download-side data logic lives in
+    ArrClient (queue_items_for_download / bulk_delete_queue).
+    """
+    if (queue_id is None) == (download_id is None):
+        return (
+            "Error: provide exactly one of queue_id or download_id "
+            "(not both, not neither). No action taken."
+        )
+    client_note, block_note = _queue_effects(remove_from_client, blocklist)
+    try:
+        if queue_id is not None:
+            queue = await client.get_queue(page_size=1000)
+            target = next(
+                (r for r in (queue.get("records") or []) if r.get("id") == queue_id), None
+            )
+            if target is None:
+                return f"Error: queue item id={queue_id} not found in queue. No action taken."
+            title = target.get("title", "")
+            if not confirm:
+                return (
+                    f"DRY-RUN: Would remove queue item [{queue_id}] '{title}' "
+                    f"(status={target.get('status', '')}).\n"
+                    f"  - {client_note}\n  - {block_note}\n"
+                    "Set confirm=True to proceed."
+                )
+            await client.delete_queue_item(
+                queue_id, remove_from_client=remove_from_client, blocklist=blocklist
+            )
+            suffix = _removed_suffix(remove_from_client, blocklist)
+            return f"Removed queue item [{queue_id}] '{title}' from {service_name}{suffix}."
+
+        # download_id branch: target every queue row of that download in one gesture.
+        items = await client.queue_items_for_download(download_id)
+        if not items:
+            return (
+                f"Error: no queue items found for downloadId '{download_id}'. No action taken."
+            )
+        ids = [i["id"] for i in items]
+        titles = {i.get("title", "") for i in items}
+        title_disp = next(iter(titles)) if len(titles) == 1 else f"{len(titles)} distinct titles"
+        if not confirm:
+            return (
+                f"DRY-RUN: Would remove {len(ids)} queue item(s) sharing downloadId "
+                f"'{download_id}' ('{title_disp}').\n"
+                f"  ids: {format_ids(ids)}\n"
+                f"  - {client_note}\n  - {block_note}\n"
+                "Set confirm=True to proceed."
+            )
+        await client.bulk_delete_queue(
+            ids, remove_from_client=remove_from_client, blocklist=blocklist
+        )
+        suffix = _removed_suffix(remove_from_client, blocklist)
+        return (
+            f"Removed {len(ids)} queue item(s) sharing downloadId '{download_id}' "
+            f"from {service_name}{suffix}."
+        )
+    except ArrClientError as e:
+        return f"Error: {e}"
 
 
 class _HasIdSize(Protocol):

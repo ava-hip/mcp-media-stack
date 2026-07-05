@@ -5,6 +5,7 @@ from mcp.server.fastmcp import FastMCP
 from media_mcp.clients.base import ArrClientError
 from media_mcp.clients.radarr import RadarrClient
 from media_mcp.config import settings
+from media_mcp.coordinated import run_delete_queue
 from media_mcp.models import (
     CalendarMovie,
     DiskSpaceSummary,
@@ -251,56 +252,31 @@ def register_radarr_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def radarr_delete_queue_item(
-        queue_id: int,
+        queue_id: int | None = None,
+        download_id: str | None = None,
         remove_from_client: bool = True,
         blocklist: bool = False,
         confirm: bool = False,
     ) -> str:
-        """Remove one item from the Radarr download queue (stuck/failed download).
+        """Remove item(s) from the Radarr download queue (stuck/failed download).
 
+        Provide EXACTLY ONE of:
+        - queue_id: a single queue item;
+        - download_id: ALL items sharing that downloadId, removed in one gesture.
         remove_from_client also deletes the download from the torrent/usenet client;
         blocklist prevents the same release from being grabbed again.
         Set confirm=True to actually remove; omit or set False for a dry-run preview.
         """
-        try:
-            async with _client() as c:
-                queue = await c.get_queue(page_size=1000)
-                records = queue.get("records", [])
-                target = next((r for r in records if r.get("id") == queue_id), None)
-                if target is None:
-                    return (
-                        f"Error: queue item id={queue_id} not found in queue. No action taken."
-                    )
-                title = target.get("title", "")
-                status = target.get("status", "")
-                if not confirm:
-                    client_note = (
-                        "will be removed from the download client"
-                        if remove_from_client
-                        else "will be kept in the download client"
-                    )
-                    block_note = (
-                        "will be blocklisted" if blocklist else "will NOT be blocklisted"
-                    )
-                    return (
-                        f"DRY-RUN: Would remove queue item [{queue_id}] '{title}' "
-                        f"(status={status}).\n"
-                        f"  - {client_note}\n"
-                        f"  - {block_note}\n"
-                        "Set confirm=True to proceed."
-                    )
-                await c.delete_queue_item(
-                    queue_id, remove_from_client=remove_from_client, blocklist=blocklist
-                )
-        except ArrClientError as e:
-            return f"Error: {e}"
-        extras = []
-        if remove_from_client:
-            extras.append("removed from download client")
-        if blocklist:
-            extras.append("blocklisted")
-        suffix = f" ({', '.join(extras)})" if extras else ""
-        return f"Removed queue item [{queue_id}] '{title}' from Radarr{suffix}."
+        async with _client() as c:
+            return await run_delete_queue(
+                c,
+                "Radarr",
+                queue_id=queue_id,
+                download_id=download_id,
+                remove_from_client=remove_from_client,
+                blocklist=blocklist,
+                confirm=confirm,
+            )
 
     @mcp.tool()
     async def radarr_add_movie(

@@ -5,7 +5,7 @@ from mcp.server.fastmcp import FastMCP
 from media_mcp.clients.base import ArrClientError
 from media_mcp.clients.sonarr import SonarrClient
 from media_mcp.config import settings
-from media_mcp.coordinated import delete_each
+from media_mcp.coordinated import delete_each, run_delete_queue
 from media_mcp.models import (
     CalendarEpisode,
     DiskSpaceSummary,
@@ -14,6 +14,7 @@ from media_mcp.models import (
     HistoryRecordSummary,
     QualityProfile,
     RootFolder,
+    SeasonEpisode,
     SeasonSummary,
     SeriesLookupResult,
     SeriesSummary,
@@ -256,56 +257,32 @@ def register_sonarr_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def sonarr_delete_queue_item(
-        queue_id: int,
+        queue_id: int | None = None,
+        download_id: str | None = None,
         remove_from_client: bool = True,
         blocklist: bool = False,
         confirm: bool = False,
     ) -> str:
-        """Remove one item from the Sonarr download queue (stuck/failed download).
+        """Remove item(s) from the Sonarr download queue (stuck/failed download).
 
+        Provide EXACTLY ONE of:
+        - queue_id: a single queue item;
+        - download_id: ALL items sharing that downloadId (a season pack = one torrent,
+          many rows) removed in one gesture.
         remove_from_client also deletes the download from the torrent/usenet client;
         blocklist prevents the same release from being grabbed again.
         Set confirm=True to actually remove; omit or set False for a dry-run preview.
         """
-        try:
-            async with _client() as c:
-                queue = await c.get_queue(page_size=1000)
-                records = queue.get("records", [])
-                target = next((r for r in records if r.get("id") == queue_id), None)
-                if target is None:
-                    return (
-                        f"Error: queue item id={queue_id} not found in queue. No action taken."
-                    )
-                title = target.get("title", "")
-                status = target.get("status", "")
-                if not confirm:
-                    client_note = (
-                        "will be removed from the download client"
-                        if remove_from_client
-                        else "will be kept in the download client"
-                    )
-                    block_note = (
-                        "will be blocklisted" if blocklist else "will NOT be blocklisted"
-                    )
-                    return (
-                        f"DRY-RUN: Would remove queue item [{queue_id}] '{title}' "
-                        f"(status={status}).\n"
-                        f"  - {client_note}\n"
-                        f"  - {block_note}\n"
-                        "Set confirm=True to proceed."
-                    )
-                await c.delete_queue_item(
-                    queue_id, remove_from_client=remove_from_client, blocklist=blocklist
-                )
-        except ArrClientError as e:
-            return f"Error: {e}"
-        extras = []
-        if remove_from_client:
-            extras.append("removed from download client")
-        if blocklist:
-            extras.append("blocklisted")
-        suffix = f" ({', '.join(extras)})" if extras else ""
-        return f"Removed queue item [{queue_id}] '{title}' from Sonarr{suffix}."
+        async with _client() as c:
+            return await run_delete_queue(
+                c,
+                "Sonarr",
+                queue_id=queue_id,
+                download_id=download_id,
+                remove_from_client=remove_from_client,
+                blocklist=blocklist,
+                confirm=confirm,
+            )
 
     @mcp.tool()
     async def sonarr_upcoming(days: int = 7) -> str:
@@ -428,6 +405,47 @@ def register_sonarr_tools(mcp: FastMCP) -> None:
             lines.append(
                 f"  [{'x' if s.monitored else ' '}] {label:<10}  "
                 f"{s.episode_file_count}/{s.total_episode_count} episodes  ({state})"
+            )
+        return "\n".join(lines)
+
+    @mcp.tool()
+    async def sonarr_season_episodes(series_id: int, season_number: int) -> str:
+        """List the episodes of one season with their file/monitoring status.
+
+        Per episode: E-number, title, hasFile (✓/✗), monitored (✓/✗), episode id, and
+        episodeFileId when present. Useful to see exactly what is present/missing (e.g.
+        confirm a phantom episode with no file). Sorted by episode number.
+        """
+        try:
+            async with _client() as c:
+                data = await c.get_episodes(series_id, season_number)
+        except ArrClientError as e:
+            if "404" in str(e):
+                return f"Error: series not found (id={series_id})."
+            return f"Error: {e}"
+
+        episodes = [
+            SeasonEpisode(
+                id=e["id"],
+                episode_number=e.get("episodeNumber", 0),
+                title=e.get("title", ""),
+                has_file=e.get("hasFile", False),
+                monitored=e.get("monitored", False),
+                episode_file_id=e.get("episodeFileId", 0),
+            )
+            for e in data
+        ]
+        if not episodes:
+            return f"No episodes found for season {season_number} (series id={series_id})."
+
+        lines = [f"Season {season_number} — {len(episodes)} episode(s):"]
+        for ep in sorted(episodes, key=lambda x: x.episode_number):
+            file_flag = "✓" if ep.has_file else "✗"
+            mon_flag = "✓" if ep.monitored else "✗"
+            file_part = f"  fileId={ep.episode_file_id}" if ep.episode_file_id else ""
+            lines.append(
+                f"  E{ep.episode_number:02d}  file={file_flag}  mon={mon_flag}  "
+                f"id={ep.id}{file_part}  {ep.title}"
             )
         return "\n".join(lines)
 

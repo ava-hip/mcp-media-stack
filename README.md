@@ -83,9 +83,10 @@ Remplacer `/chemin/absolu/media-mcp` par le chemin réel du projet.
 | `sonarr_disk_space` | read | Espace disque par volume, le plus plein en premier |
 | `sonarr_health` | read | Avertissements de santé de l'instance |
 | `sonarr_history(limit=20, event_type=None)` | read | Événements récents (grab/import/…) avec downloadId ; filtre `event_type` optionnel (voir ci-dessous) |
-| `sonarr_delete_queue_item(queue_id, remove_from_client=True, blocklist=False, confirm=False)` | write | Retire un élément de la queue |
+| `sonarr_delete_queue_item(queue_id=None, download_id=None, remove_from_client=True, blocklist=False, confirm=False)` | write | Retire un item (par `queue_id`) ou **tous** ceux d'un même `download_id` (season pack) — exactement un des deux |
 | `sonarr_upcoming(days=7)` | read | Épisodes à venir via calendrier |
 | `sonarr_series_seasons(series_id)` | read | Détail saison par saison d'une série |
+| `sonarr_season_episodes(series_id, season_number)` | read | Liste les épisodes d'une saison (E-num, titre, hasFile ✓/✗, monitored ✓/✗, id, fileId) |
 | `sonarr_add_series(tvdb_id, quality_profile_id, root_folder_path, confirm=False)` | write | Ajoute une série |
 | `sonarr_set_season_monitoring(series_id, season_number, monitored)` | write | (Dé)monitore une saison précise |
 | `sonarr_search_season(series_id, season_number, confirm=False)` | write | Lance la recherche d'une saison |
@@ -105,7 +106,7 @@ Remplacer `/chemin/absolu/media-mcp` par le chemin réel du projet.
 | `radarr_disk_space` | read | Espace disque par volume, le plus plein en premier |
 | `radarr_health` | read | Avertissements de santé de l'instance |
 | `radarr_history(limit=20, event_type=None)` | read | Événements récents (grab/import/…) avec downloadId ; filtre `event_type` optionnel (voir ci-dessous) |
-| `radarr_delete_queue_item(queue_id, remove_from_client=True, blocklist=False, confirm=False)` | write | Retire un élément de la queue |
+| `radarr_delete_queue_item(queue_id=None, download_id=None, remove_from_client=True, blocklist=False, confirm=False)` | write | Retire un item (par `queue_id`) ou **tous** ceux d'un même `download_id` — exactement un des deux |
 | `radarr_upcoming(days=7)` | read | Films à venir via calendrier |
 | `radarr_add_movie(tmdb_id, quality_profile_id, root_folder_path, confirm=False)` | write | Ajoute un film |
 | `radarr_set_movie_monitoring(movie_id, monitored)` | write | (Dé)monitore un film |
@@ -211,8 +212,13 @@ des `statusMessages` et l'`errorMessage` éventuel. Les messages par item sont b
 (`(+N more)`) pour rester lisibles ; un champ absent/`null` est géré sans erreur.
 
 Les items partageant le **même `downloadId`** (un season pack = un torrent, N lignes) sont
-**regroupés** en une entrée `[×N]` affichant le `downloadId` (le pont vers qBittorrent). Les
-items sans `downloadId` restent individuels et conservent taille/ETA.
+**regroupés** en une entrée `[×N]` affichant le `downloadId` (le pont vers qBittorrent) et la
+ligne `ids: …` (les queue IDs individuels du groupe, tronquée si trop longue). Les items sans
+`downloadId` restent individuels et conservent taille/ETA.
+
+`*_delete_queue_item` accepte **exactement un** de `queue_id` (un item) ou `download_id`
+(**tous** les items du download, retirés en un seul `DELETE /queue/bulk`) ; en dry-run il liste
+le nombre d'items, leur(s) titre(s) et les IDs ciblés avant toute suppression.
 
 ## Développement
 

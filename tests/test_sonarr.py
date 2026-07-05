@@ -676,6 +676,8 @@ async def test_queue_groups_shared_download_id(monkeypatch):
     assert "3 item(s) in 1 group(s)" in result
     assert "[×3] Pack.S06.MULTI" in result
     assert "downloadId=SEASONPACK" in result
+    # Individual queue ids are re-surfaced despite grouping.
+    assert "ids: 1, 2, 3" in result
 
 
 @respx.mock
@@ -704,3 +706,107 @@ async def test_queue_empty_message(monkeypatch):
     result = await fn()
 
     assert result == "Download queue is empty."
+
+
+# ── sonarr_season_episodes ────────────────────────────────────────────────────
+
+
+@respx.mock
+async def test_season_episodes_file_and_monitored(monkeypatch):
+    eps = [
+        {"id": 10, "episodeNumber": 17, "seasonNumber": 6, "title": "Real Episode",
+         "hasFile": True, "monitored": True, "episodeFileId": 555},
+        {"id": 11, "episodeNumber": 18, "seasonNumber": 6, "title": "Phantom Episode",
+         "hasFile": False, "monitored": True, "episodeFileId": 0},
+    ]
+    respx.get(f"{BASE}/episode").mock(return_value=Response(200, json=eps))
+
+    fn = _seasons_tool("sonarr_season_episodes", monkeypatch)
+    result = await fn(series_id=44, season_number=6)
+
+    assert "6 episode(s)" not in result  # only 2 episodes
+    assert "2 episode(s)" in result
+    assert "E17  file=✓  mon=✓  id=10  fileId=555  Real Episode" in result
+    # Phantom E18: no file, no fileId shown.
+    assert "E18  file=✗  mon=✓  id=11  Phantom Episode" in result
+    assert "fileId" not in result.split("Phantom")[0].split("E18")[-1]
+
+
+@respx.mock
+async def test_season_episodes_empty(monkeypatch):
+    respx.get(f"{BASE}/episode").mock(return_value=Response(200, json=[]))
+
+    fn = _seasons_tool("sonarr_season_episodes", monkeypatch)
+    result = await fn(series_id=44, season_number=99)
+
+    assert "no episodes found for season 99" in result.lower()
+
+
+# ── delete_queue_item by download_id ──────────────────────────────────────────
+
+
+def _dl_queue(dlid):
+    def rec(rec_id, dl, title="Pack.S06"):
+        return {
+            "id": rec_id, "title": title, "status": "completed",
+            "downloadId": dl, "size": 0, "sizeleft": 0, "timeleft": None,
+        }
+    return {"records": [rec(1, dlid), rec(2, dlid), rec(3, "OTHER", "Other")]}
+
+
+@respx.mock
+async def test_delete_queue_by_download_id_dry_run(monkeypatch):
+    respx.get(f"{BASE}/queue").mock(return_value=Response(200, json=_dl_queue("PACK")))
+    bulk = respx.delete(f"{BASE}/queue/bulk").mock(return_value=Response(200, json={}))
+
+    fn = _seasons_tool("sonarr_delete_queue_item", monkeypatch)
+    result = await fn(download_id="PACK", confirm=False)
+
+    assert not bulk.called
+    assert "DRY-RUN" in result
+    assert "2 queue item(s)" in result  # only the two PACK items, not OTHER
+    assert "ids: 1, 2" in result
+    assert "will be removed from the download client" in result
+
+
+@respx.mock
+async def test_delete_queue_by_download_id_confirm_bulk(monkeypatch):
+    respx.get(f"{BASE}/queue").mock(return_value=Response(200, json=_dl_queue("PACK")))
+    bulk = respx.delete(f"{BASE}/queue/bulk").mock(return_value=Response(200, json={}))
+
+    fn = _seasons_tool("sonarr_delete_queue_item", monkeypatch)
+    result = await fn(download_id="PACK", remove_from_client=True, blocklist=True, confirm=True)
+
+    assert bulk.call_count == 1
+    body = json.loads(bulk.calls.last.request.content)
+    assert set(body["ids"]) == {1, 2}
+    params = bulk.calls.last.request.url.params
+    assert params["removeFromClient"] == "true"
+    assert params["blocklist"] == "true"
+    assert "Removed 2 queue item(s)" in result
+
+
+@respx.mock
+async def test_delete_queue_download_id_unknown(monkeypatch):
+    respx.get(f"{BASE}/queue").mock(return_value=Response(200, json=_dl_queue("PACK")))
+    bulk = respx.delete(f"{BASE}/queue/bulk").mock(return_value=Response(200, json={}))
+
+    fn = _seasons_tool("sonarr_delete_queue_item", monkeypatch)
+    result = await fn(download_id="NOPE", confirm=True)
+
+    assert not bulk.called
+    assert "no queue items found" in result.lower()
+
+
+@respx.mock
+async def test_delete_queue_validation_both_provided(monkeypatch):
+    fn = _seasons_tool("sonarr_delete_queue_item", monkeypatch)
+    result = await fn(queue_id=1, download_id="X")
+    assert "exactly one" in result.lower()
+
+
+@respx.mock
+async def test_delete_queue_validation_neither_provided(monkeypatch):
+    fn = _seasons_tool("sonarr_delete_queue_item", monkeypatch)
+    result = await fn()
+    assert "exactly one" in result.lower()

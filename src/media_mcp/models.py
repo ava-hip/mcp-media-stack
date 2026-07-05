@@ -148,8 +148,22 @@ def format_queue(records: list[dict]) -> str:
         lines.append(f"  {tag} {head.title[:60]}  status={head.status}{size_part}")
         if head.download_id:
             lines.append(f"      downloadId={head.download_id}")
+        if len(grp) > 1:
+            # Re-surface the individual queue ids (grouping otherwise hides them).
+            lines.append(f"      ids: {format_ids([it.id for it in grp])}")
         lines.extend(_diagnostic_lines(head))
     return "\n".join(lines)
+
+
+# Keep the ids line readable when a season pack has many rows.
+_MAX_IDS_SHOWN = 10
+
+
+def format_ids(ids: list[int]) -> str:
+    shown = ids[:_MAX_IDS_SHOWN]
+    text = ", ".join(str(i) for i in shown)
+    extra = len(ids) - len(shown)
+    return f"{text}, … (+{extra} more)" if extra > 0 else text
 
 
 class DiskSpaceSummary(BaseModel):
@@ -236,6 +250,15 @@ class EpisodeFileSummary(BaseModel):
     season_number: int
     relative_path: str
     size: int
+
+
+class SeasonEpisode(BaseModel):
+    id: int
+    episode_number: int
+    title: str
+    has_file: bool
+    monitored: bool
+    episode_file_id: int  # 0 when no file
 
 
 class SeriesLookupResult(BaseModel):
