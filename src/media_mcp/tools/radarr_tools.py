@@ -185,7 +185,10 @@ def register_radarr_tools(mcp: FastMCP) -> None:
                     "addOptions": {"searchForMovie": True},
                 }
                 result = await c.add_movie(body)
-            return f"Added movie '{result['title']}' ({result.get('year', '')}) id={result['id']} to Radarr."
+            title = result["title"]
+            year = result.get("year", "")
+            mid = result["id"]
+            return f"Added movie '{title}' ({year}) id={mid} to Radarr."
         except ArrClientError as e:
             return f"Error: {e}"
 

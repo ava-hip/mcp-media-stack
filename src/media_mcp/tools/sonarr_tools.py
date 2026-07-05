@@ -57,7 +57,8 @@ def register_sonarr_tools(mcp: FastMCP) -> None:
             ]
             if not series:
                 return "No series found in Sonarr."
-            lines = [f"{'ID':>5}  {'Title':<40}  {'Year'}  {'Status':<12}  {'Mon':>3}  {'Missing':>7}"]
+            cols = f"{'ID':>5}  {'Title':<40}  {'Year'}  {'Status':<12}  {'Mon':>3}  {'Missing':>7}"
+            lines = [cols]
             lines.append("-" * 80)
             for s in sorted(series, key=lambda x: x.title):
                 lines.append(

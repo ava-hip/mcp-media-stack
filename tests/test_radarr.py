@@ -1,9 +1,11 @@
 import pytest
 import respx
 from httpx import Response
+from mcp.server.fastmcp import FastMCP
 
 from media_mcp.clients.base import ArrClientError
 from media_mcp.clients.radarr import RadarrClient
+from media_mcp.tools.radarr_tools import register_radarr_tools
 
 BASE = "http://radarr.test:7878/api/v3"
 
@@ -16,7 +18,9 @@ def client():
 @respx.mock
 async def test_system_status(client):
     respx.get(f"{BASE}/system/status").mock(
-        return_value=Response(200, json={"appName": "Radarr", "version": "5.0.0", "isDebug": False, "urlBase": ""})
+        return_value=Response(
+            200, json={"appName": "Radarr", "version": "5.0.0", "isDebug": False, "urlBase": ""}
+        )
     )
     data = await client.system_status()
     assert data["version"] == "5.0.0"
@@ -44,15 +48,10 @@ async def test_get_movies(client):
 @respx.mock
 async def test_delete_movie_dry_run():
     """radarr_delete_movie with confirm=False must not call the API."""
-    from mcp.server.fastmcp import FastMCP
-
-    from media_mcp.tools.radarr_tools import register_radarr_tools
-
     test_mcp = FastMCP("test")
     register_radarr_tools(test_mcp)
 
-    tools = {t.name: t for t in await test_mcp.get_tools()}
-    delete_fn = tools["radarr_delete_movie"].fn
+    delete_fn = test_mcp._tool_manager.get_tool("radarr_delete_movie").fn
 
     result = await delete_fn(movie_id=10, delete_files=False, confirm=False)
     assert "DRY-RUN" in result
@@ -61,15 +60,10 @@ async def test_delete_movie_dry_run():
 
 @respx.mock
 async def test_delete_movie_with_files_dry_run():
-    from mcp.server.fastmcp import FastMCP
-
-    from media_mcp.tools.radarr_tools import register_radarr_tools
-
     test_mcp = FastMCP("test")
     register_radarr_tools(test_mcp)
 
-    tools = {t.name: t for t in await test_mcp.get_tools()}
-    delete_fn = tools["radarr_delete_movie"].fn
+    delete_fn = test_mcp._tool_manager.get_tool("radarr_delete_movie").fn
 
     result = await delete_fn(movie_id=10, delete_files=True, confirm=False)
     assert "DRY-RUN" in result
