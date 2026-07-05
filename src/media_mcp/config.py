@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     radarr_url: AnyHttpUrl = AnyHttpUrl("http://localhost:7878")
     radarr_api_key: str = ""
 
+    # Prowlarr (indexer manager). Servarr API but on /api/v1 (not v3).
+    prowlarr_url: str = ""
+    prowlarr_api_key: str = ""
+
     # qBittorrent access goes through "qui" (autobrr), not qBittorrent directly.
     # Empty values mean "not configured" — the QuiClient raises a clear error.
     qui_url: str = ""

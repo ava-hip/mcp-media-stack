@@ -183,6 +183,29 @@ class HealthIssue(BaseModel):
     message: str
 
 
+class IndexerSummary(BaseModel):
+    id: int
+    name: str
+    enable: bool
+    protocol: str
+    privacy: str
+    categories: list[str]  # top-level category names
+    tags: list[int]
+
+
+class SearchResult(BaseModel):
+    title: str
+    indexer: str
+    indexer_id: int
+    size: int
+    seeders: int
+    leechers: int
+    protocol: str
+    age_days: int
+    category: str
+    guid: str  # grab reference (with indexer_id)
+
+
 class HistoryRecordSummary(BaseModel):
     event_type: str
     source_title: str

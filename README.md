@@ -48,7 +48,9 @@ Ajouter dans `~/Library/Application Support/Claude/claude_desktop_config.json`
         "RADARR_API_KEY": "xxx",
         "QUI_URL": "https://qui.example.com",
         "QUI_API_KEY": "xxx",
-        "QUI_INSTANCE": ""
+        "QUI_INSTANCE": "",
+        "PROWLARR_URL": "http://localhost:9696",
+        "PROWLARR_API_KEY": "xxx"
       }
     }
   }
@@ -68,6 +70,8 @@ Remplacer `/chemin/absolu/media-mcp` par le chemin réel du projet.
 | `QUI_URL` | URL de base de l'instance qui | *(requis pour qBit)* |
 | `QUI_API_KEY` | Clé API qui (Settings > API Keys) | *(requis pour qBit)* |
 | `QUI_INSTANCE` | Instance qBit ciblée (id ou nom) ; vide = auto si une seule | *(optionnel)* |
+| `PROWLARR_URL` | URL de base Prowlarr | *(requis pour Prowlarr)* |
+| `PROWLARR_API_KEY` | Clé API Prowlarr | *(requis pour Prowlarr)* |
 
 ## Tools disponibles
 
@@ -138,6 +142,39 @@ agir.
 Le **hash** qBittorrent est la clé de liaison : c'est la valeur renvoyée par le `downloadId`
 de l'historique Sonarr/Radarr. La comparaison est insensible à la casse (qBit renvoie le
 hash en minuscules, les *arr souvent en majuscules).
+
+### Prowlarr (indexeurs)
+
+Gestionnaire d'indexeurs Servarr — **API en `/api/v1`** (et non v3), auth `X-Api-Key`.
+Orienté diagnostic des indexeurs.
+
+| Tool | Type | Description |
+|---|---|---|
+| `prowlarr_system_status` | read | Version de Prowlarr |
+| `prowlarr_list_indexers` | read | Indexeurs configurés (id, nom, activé ✓/✗, protocole, privacy, catégories, tags), triés par nom |
+| `prowlarr_indexer_status` | read | Indexeurs **en échec / désactivés temporairement** (+ `disabledTill`, dates d'échec) ; sinon « all indexers healthy » |
+| `prowlarr_health` | read | Avertissements globaux Prowlarr (type/source/message) |
+| `prowlarr_test_indexer(indexer_id)` | action | Teste la connectivité d'un indexeur → PASS/FAIL + message (pas de confirm) |
+| `prowlarr_test_all_indexers` | action | Teste tous les indexeurs → résumé pass/fail, échecs mis en avant |
+| `prowlarr_search(query, indexer_ids=None, categories=None, limit=20)` | read | Recherche cross-indexeurs (tout contenu) triée par seeders ; affiche `guid`+`indexerId` pour le grab |
+| `prowlarr_grab(guid, indexer_id, confirm=False)` | acquisition | Envoie une release au download client de Prowlarr (dry-run/confirm) |
+
+> `prowlarr_indexer_status` ne porte pas de message textuel de raison (l'API `/indexerstatus`
+> n'expose que `indexerId` + horodatages) : il croise la liste des indexeurs pour le nom et
+> affiche la date de reprise (`disabledTill`). Pour le « pourquoi » global, voir `prowlarr_health`.
+
+#### Recherche & grab (contenu hors-*arr : ebooks, manga, logiciels…)
+
+`prowlarr_search` interroge tous les indexeurs et renvoie, par release, la **référence de grab**
+(`guid` + `indexerId`) à passer à `prowlarr_grab`. Les résultats sont triés par seeders
+décroissant (le `limit` de Prowlarr n'étant pas un vrai plafond, la coupe est faite côté client).
+
+`prowlarr_grab` envoie la release au **download client configuré dans Prowlarr** (dry-run par
+défaut ; `confirm=True` pour exécuter). **Aucune catégorie n'est passée par le MCP** : le
+classement final dans qBittorrent (ebook / logiciel / autre) est décidé par les **Mapped
+Categories** du download client, **à configurer dans l'UI Prowlarr** (Settings → Download
+Clients). S'il n'y a aucun download client, le grab renvoie un message clair (à ajouter d'abord
+dans l'UI). La recherche/le grab avec catégorie explicite restent gérés côté Prowlarr, pas ici.
 
 ### Tools coordonnés — purge « partout »
 
@@ -244,11 +281,13 @@ src/media_mcp/
     base.py          # ArrClient: httpx async, gestion des erreurs
     sonarr.py        # SonarrClient(ArrClient)
     radarr.py        # RadarrClient(ArrClient)
+    prowlarr.py      # ProwlarrClient(ArrClient) — /api/v1
     qui.py           # QuiClient: httpx async, header X-API-Key (NE dérive PAS d'ArrClient)
   tools/
     sonarr_tools.py  # @mcp.tool pour Sonarr
     radarr_tools.py  # @mcp.tool pour Radarr
     qbit_tools.py    # @mcp.tool pour qBittorrent via qui
+    prowlarr_tools.py     # @mcp.tool pour Prowlarr (indexeurs)
     coordinated_tools.py  # @mcp.tool purge saison/film "partout" (arr + qui)
 ```
 

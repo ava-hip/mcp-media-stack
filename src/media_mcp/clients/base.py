@@ -44,8 +44,15 @@ def _resolve_history_event_type(event_type: str) -> set[str]:
 class ArrClient:
     """Base async HTTP client for *arr services (Sonarr, Radarr)."""
 
-    def __init__(self, base_url: str, api_key: str, timeout: float = 30.0) -> None:
-        self._base = base_url.rstrip("/") + "/api/v3"
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        timeout: float = 30.0,
+        api_version: str = "v3",
+    ) -> None:
+        # Sonarr/Radarr use /api/v3; Prowlarr uses /api/v1 — hence the parameter.
+        self._base = base_url.rstrip("/") + f"/api/{api_version}"
         self._client = httpx.AsyncClient(
             headers={"X-Api-Key": api_key},
             timeout=timeout,
