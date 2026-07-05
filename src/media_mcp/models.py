@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 
+
 # Static reminder shown in delete previews: Sonarr only removes its own record/file,
 # so hardlinked files keep occupying disk until the torrent is removed in the client too.
 def hardlink_note(service: str) -> str:
@@ -32,6 +33,30 @@ class QueueItem(BaseModel):
     size_mb: float
     sizeleft_mb: float
     time_left: str | None
+
+
+class DiskSpaceSummary(BaseModel):
+    label: str
+    path: str
+    free: int
+    total: int
+
+    @property
+    def pct_free(self) -> float:
+        return (self.free / self.total * 100) if self.total else 0.0
+
+
+class HealthIssue(BaseModel):
+    type: str
+    source: str
+    message: str
+
+
+class HistoryRecordSummary(BaseModel):
+    event_type: str
+    source_title: str
+    date: str
+    download_id: str | None
 
 
 class QualityProfile(BaseModel):

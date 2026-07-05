@@ -48,9 +48,6 @@ class SonarrClient(ArrClient):
         """Delete a single episode file (from disk + Sonarr database)."""
         await self._delete(f"/episodefile/{file_id}")
 
-    async def get_queue(self) -> dict[str, Any]:
-        return await self._get("/queue")
-
     async def get_calendar(self, start: str, end: str) -> list[dict[str, Any]]:
         return await self._get("/calendar", start=start, end=end)
 

@@ -40,9 +40,6 @@ class RadarrClient(ArrClient):
     async def delete_movie(self, movie_id: int, delete_files: bool = False) -> None:
         await self._delete(f"/movie/{movie_id}", deleteFiles=str(delete_files).lower())
 
-    async def get_queue(self) -> dict[str, Any]:
-        return await self._get("/queue")
-
     async def get_quality_profiles(self) -> list[dict[str, Any]]:
         return await self._get("/qualityprofile")
 

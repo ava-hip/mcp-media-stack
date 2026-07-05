@@ -7,6 +7,40 @@ class ArrClientError(Exception):
     pass
 
 
+# Readable filter alias -> canonical history "eventType" string(s) as returned by the API.
+# Sonarr and Radarr share the download-side events; file events differ per service, so the
+# "deleted"/"renamed" aliases cover both (only the relevant one ever matches per service).
+HISTORY_EVENT_ALIASES: dict[str, set[str]] = {
+    "grabbed": {"grabbed"},
+    "imported": {"downloadFolderImported"},
+    "failed": {"downloadFailed"},
+    "deleted": {"episodeFileDeleted", "movieFileDeleted"},
+    "renamed": {"episodeFileRenamed", "movieFileRenamed"},
+    "ignored": {"downloadIgnored"},
+}
+
+_HISTORY_CANONICAL: set[str] = {c for values in HISTORY_EVENT_ALIASES.values() for c in values}
+
+
+def _resolve_history_event_type(event_type: str) -> set[str]:
+    """Map a readable alias or exact canonical eventType (case-insensitive) to a set.
+
+    Raises ValueError listing the accepted values if nothing matches.
+    """
+    key = event_type.strip().lower()
+    if key in HISTORY_EVENT_ALIASES:
+        return HISTORY_EVENT_ALIASES[key]
+    canonical = {c for c in _HISTORY_CANONICAL if c.lower() == key}
+    if canonical:
+        return canonical
+    aliases = ", ".join(sorted(HISTORY_EVENT_ALIASES))
+    canonicals = ", ".join(sorted(_HISTORY_CANONICAL))
+    raise ValueError(
+        f"Unknown event_type '{event_type}'. Accepted aliases: {aliases}. "
+        f"Canonical values also accepted: {canonicals}."
+    )
+
+
 class ArrClient:
     """Base async HTTP client for *arr services (Sonarr, Radarr)."""
 
@@ -71,6 +105,83 @@ class ArrClient:
             raise ArrClientError(
                 f"HTTP {e.response.status_code} on DELETE {path}: {e.response.text}"
             ) from e
+
+    # ── Shared observability helpers (same endpoints on Sonarr & Radarr) ──────
+
+    async def disk_space(self) -> list[dict[str, Any]]:
+        """Return disk usage per volume: path, label, freeSpace, totalSpace (bytes)."""
+        return await self._get("/diskspace")
+
+    async def health(self) -> list[dict[str, Any]]:
+        """Return instance health checks (may be an empty list)."""
+        return await self._get("/health")
+
+    async def history(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        sort_key: str = "date",
+        sort_direction: str = "descending",
+    ) -> dict[str, Any]:
+        """Return a raw page of history events (grab/import/deletion...).
+
+        Note: the API's ``eventType`` query param expects an integer enum, so we never
+        send it; filtering by the readable string is done client-side in
+        :meth:`history_events`.
+        """
+        return await self._get(
+            "/history",
+            page=page,
+            pageSize=page_size,
+            sortKey=sort_key,
+            sortDirection=sort_direction,
+        )
+
+    async def history_events(
+        self,
+        limit: int = 20,
+        event_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Return recent history events, optionally filtered by a readable event type.
+
+        Returns ``{"records": [...], "note": str | None}``. The note is set when a
+        client-side filter could not fill ``limit`` within the fetched window.
+        Raises :class:`ValueError` for an unknown ``event_type`` (no API call made).
+        """
+        if event_type is None:
+            data = await self.history(page=1, page_size=limit)
+            return {"records": data.get("records", [])[:limit], "note": None}
+
+        wanted = {w.lower() for w in _resolve_history_event_type(event_type)}
+        window = max(limit * 5, 100)
+        data = await self.history(page=1, page_size=window)
+        records = data.get("records", [])
+        matched = [r for r in records if str(r.get("eventType", "")).lower() in wanted]
+        result = matched[:limit]
+        note = None
+        if len(result) < limit:
+            note = (
+                f"showing {len(result)} of up to {limit} "
+                f"(searched the {window} most recent events)"
+            )
+        return {"records": result, "note": note}
+
+    async def get_queue(self, page: int = 1, page_size: int = 100) -> dict[str, Any]:
+        """Return a page of the download queue."""
+        return await self._get("/queue", page=page, pageSize=page_size)
+
+    async def delete_queue_item(
+        self,
+        queue_id: int,
+        remove_from_client: bool = True,
+        blocklist: bool = False,
+    ) -> None:
+        """Remove one item from the download queue."""
+        await self._delete(
+            f"/queue/{queue_id}",
+            removeFromClient=str(remove_from_client).lower(),
+            blocklist=str(blocklist).lower(),
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()

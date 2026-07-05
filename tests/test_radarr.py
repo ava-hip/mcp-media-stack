@@ -271,3 +271,120 @@ async def test_upcoming_summary(monkeypatch):
     # Tenet: physical release; has file marked with ✓.
     assert "2020-12-15 (physical)  Tenet (2020)  mon=no" in result
     assert "[✓]" in result
+
+
+# ── Observability tools ───────────────────────────────────────────────────────
+# These helpers live in the shared ArrClient base and are covered in depth on the
+# Sonarr side (tests/test_sonarr.py). Here we only smoke-test that each Radarr tool
+# is wired to its client and renders.
+
+
+@respx.mock
+async def test_disk_space_smoke(monkeypatch):
+    payload = [
+        {"path": "/media", "label": "Media", "freeSpace": 30 * GIB, "totalSpace": 100 * GIB},
+        {
+            "path": "/downloads",
+            "label": "Downloads",
+            "freeSpace": 10 * GIB,
+            "totalSpace": 100 * GIB,
+        },
+    ]
+    respx.get(f"{BASE}/diskspace").mock(return_value=Response(200, json=payload))
+
+    fn = _radarr_tool("radarr_disk_space", monkeypatch)
+    result = await fn()
+
+    # Fullest volume first, size formatting applied.
+    assert result.index("Downloads") < result.index("Media")
+    assert "(10% free)" in result
+
+
+@respx.mock
+async def test_health_smoke(monkeypatch):
+    respx.get(f"{BASE}/health").mock(return_value=Response(200, json=[]))
+
+    fn = _radarr_tool("radarr_health", monkeypatch)
+    result = await fn()
+
+    assert "no health issues" in result.lower()
+
+
+@respx.mock
+async def test_history_smoke(monkeypatch):
+    payload = {
+        "page": 1,
+        "pageSize": 20,
+        "totalRecords": 1,
+        "records": [
+            {
+                "eventType": "grabbed",
+                "sourceTitle": "Inception.2010",
+                "date": "2026-07-05T10:00:00Z",
+                "downloadId": "HASH42",
+            }
+        ],
+    }
+    route = respx.get(f"{BASE}/history").mock(return_value=Response(200, json=payload))
+
+    fn = _radarr_tool("radarr_history", monkeypatch)
+    result = await fn(limit=20)
+
+    assert route.calls.last.request.url.params["sortDirection"] == "descending"
+    assert "downloadId=HASH42" in result
+
+
+@respx.mock
+async def test_history_deleted_alias_matches_movie_file_deleted(monkeypatch):
+    payload = {
+        "page": 1,
+        "pageSize": 100,
+        "totalRecords": 2,
+        "records": [
+            {
+                "eventType": "movieFileDeleted",
+                "sourceTitle": "Inception",
+                "date": "2026-07-05T10:00:00Z",
+            },
+            {"eventType": "grabbed", "sourceTitle": "Tenet", "date": "2026-07-05T09:00:00Z"},
+        ],
+    }
+    route = respx.get(f"{BASE}/history").mock(return_value=Response(200, json=payload))
+
+    fn = _radarr_tool("radarr_history", monkeypatch)
+    result = await fn(limit=20, event_type="deleted")
+
+    # Client-side filter: no eventType param sent, only the movieFileDeleted record kept.
+    assert "eventType" not in route.calls.last.request.url.params
+    assert "movieFileDeleted" in result
+    assert "Inception" in result
+    assert "Tenet" not in result
+
+
+@respx.mock
+async def test_delete_queue_item_smoke(monkeypatch):
+    queue = {
+        "page": 1,
+        "pageSize": 100,
+        "totalRecords": 1,
+        "records": [
+            {"id": 88, "title": "Stuck.Movie", "status": "stalled", "size": GIB, "sizeleft": GIB}
+        ],
+    }
+    respx.get(f"{BASE}/queue").mock(return_value=Response(200, json=queue))
+    delete_route = respx.delete(f"{BASE}/queue/88").mock(return_value=Response(200, json={}))
+
+    fn = _radarr_tool("radarr_delete_queue_item", monkeypatch)
+
+    # Dry-run emits no DELETE.
+    dry = await fn(queue_id=88, confirm=False)
+    assert not delete_route.called
+    assert "DRY-RUN" in dry
+
+    # Confirm sends DELETE with query params.
+    result = await fn(queue_id=88, remove_from_client=True, blocklist=False, confirm=True)
+    assert delete_route.called
+    params = delete_route.calls.last.request.url.params
+    assert params["removeFromClient"] == "true"
+    assert params["blocklist"] == "false"
+    assert "Removed queue item [88]" in result

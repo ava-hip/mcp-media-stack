@@ -7,7 +7,10 @@ from media_mcp.clients.sonarr import SonarrClient
 from media_mcp.config import settings
 from media_mcp.models import (
     CalendarEpisode,
+    DiskSpaceSummary,
     EpisodeFileSummary,
+    HealthIssue,
+    HistoryRecordSummary,
     QualityProfile,
     QueueItem,
     RootFolder,
@@ -16,7 +19,7 @@ from media_mcp.models import (
     SeriesSummary,
     SystemStatus,
     format_size,
-    hardlink_note
+    hardlink_note,
 )
 
 
@@ -173,6 +176,151 @@ def register_sonarr_tools(mcp: FastMCP) -> None:
             return "\n".join(lines)
         except ArrClientError as e:
             return f"Error: {e}"
+
+    @mcp.tool()
+    async def sonarr_disk_space() -> str:
+        """Show free disk space per volume known to Sonarr, fullest volume first."""
+        try:
+            async with _client() as c:
+                data = await c.disk_space()
+        except ArrClientError as e:
+            return f"Error: {e}"
+        if not data:
+            return "No disk space information reported by Sonarr."
+        volumes = [
+            DiskSpaceSummary(
+                label=d.get("label", "") or d.get("path", ""),
+                path=d.get("path", ""),
+                free=d.get("freeSpace", 0),
+                total=d.get("totalSpace", 0),
+            )
+            for d in data
+        ]
+        lines = [f"Disk space ({len(volumes)} volume(s)):"]
+        for v in sorted(volumes, key=lambda x: x.pct_free):
+            label = v.label or v.path
+            lines.append(
+                f"  {label}  {format_size(v.free)} free / {format_size(v.total)}  "
+                f"({v.pct_free:.0f}% free)"
+            )
+        return "\n".join(lines)
+
+    @mcp.tool()
+    async def sonarr_health() -> str:
+        """Show Sonarr instance health checks (notices, warnings, errors)."""
+        try:
+            async with _client() as c:
+                data = await c.health()
+        except ArrClientError as e:
+            return f"Error: {e}"
+        if not data:
+            return "No health issues reported by Sonarr."
+        issues = [
+            HealthIssue(
+                type=h.get("type", "unknown"),
+                source=h.get("source", ""),
+                message=h.get("message", ""),
+            )
+            for h in data
+        ]
+        lines = [f"Health issues ({len(issues)}):"]
+        for i in issues:
+            lines.append(f"  [{i.type}] {i.source}: {i.message}")
+        return "\n".join(lines)
+
+    @mcp.tool()
+    async def sonarr_history(limit: int = 20, event_type: str | None = None) -> str:
+        """Show recent Sonarr history events (grab/import/deletion...).
+
+        Surfaces the downloadId (the torrent hash) when present, which later links a
+        release to its torrent in the download client. Optionally filter by event_type,
+        accepting a readable alias (grabbed, imported, failed, deleted, renamed, ignored)
+        or an exact canonical eventType (e.g. downloadFolderImported). Filtering is done
+        client-side, so a filtered result may include a note when the window is not filled.
+        """
+        try:
+            async with _client() as c:
+                result = await c.history_events(limit=limit, event_type=event_type)
+        except ValueError as e:
+            return f"Error: {e}"
+        except ArrClientError as e:
+            return f"Error: {e}"
+        records = result["records"]
+        if not records:
+            suffix = f" for event_type='{event_type}'" if event_type else ""
+            return f"No history events{suffix}."
+        events = [
+            HistoryRecordSummary(
+                event_type=r.get("eventType", ""),
+                source_title=r.get("sourceTitle", ""),
+                date=r.get("date", ""),
+                download_id=r.get("downloadId"),
+            )
+            for r in records
+        ]
+        header = f"Recent history ({len(events)} event(s))"
+        if event_type:
+            header += f" — event_type={event_type}"
+        lines = [header + ":"]
+        for e in events:
+            dl = f"downloadId={e.download_id}" if e.download_id else "no downloadId"
+            lines.append(f"  {e.date}  {e.event_type}  {e.source_title}  [{dl}]")
+        if result["note"]:
+            lines.append(result["note"])
+        return "\n".join(lines)
+
+    @mcp.tool()
+    async def sonarr_delete_queue_item(
+        queue_id: int,
+        remove_from_client: bool = True,
+        blocklist: bool = False,
+        confirm: bool = False,
+    ) -> str:
+        """Remove one item from the Sonarr download queue (stuck/failed download).
+
+        remove_from_client also deletes the download from the torrent/usenet client;
+        blocklist prevents the same release from being grabbed again.
+        Set confirm=True to actually remove; omit or set False for a dry-run preview.
+        """
+        try:
+            async with _client() as c:
+                queue = await c.get_queue(page_size=1000)
+                records = queue.get("records", [])
+                target = next((r for r in records if r.get("id") == queue_id), None)
+                if target is None:
+                    return (
+                        f"Error: queue item id={queue_id} not found in queue. No action taken."
+                    )
+                title = target.get("title", "")
+                status = target.get("status", "")
+                if not confirm:
+                    client_note = (
+                        "will be removed from the download client"
+                        if remove_from_client
+                        else "will be kept in the download client"
+                    )
+                    block_note = (
+                        "will be blocklisted" if blocklist else "will NOT be blocklisted"
+                    )
+                    return (
+                        f"DRY-RUN: Would remove queue item [{queue_id}] '{title}' "
+                        f"(status={status}).\n"
+                        f"  - {client_note}\n"
+                        f"  - {block_note}\n"
+                        "Set confirm=True to proceed."
+                    )
+                await c.delete_queue_item(
+                    queue_id, remove_from_client=remove_from_client, blocklist=blocklist
+                )
+        except ArrClientError as e:
+            return f"Error: {e}"
+        extras = []
+        if remove_from_client:
+            extras.append("removed from download client")
+        if blocklist:
+            extras.append("blocklisted")
+        suffix = f" ({', '.join(extras)})" if extras else ""
+        return f"Removed queue item [{queue_id}] '{title}' from Sonarr{suffix}."
 
     @mcp.tool()
     async def sonarr_upcoming(days: int = 7) -> str:
@@ -408,7 +556,7 @@ def register_sonarr_tools(mcp: FastMCP) -> None:
                     return (
                         f"DRY-RUN: Would delete {len(files)} episode file(s) from "
                         f"season {season_number} of '{title}' — {format_size(total_size)} total.\n"
-                        f"{hardlink_note("Sonarr")}\n"
+                        f"{hardlink_note('Sonarr')}\n"
                         "Set confirm=True to proceed."
                     )
 
@@ -459,7 +607,7 @@ def register_sonarr_tools(mcp: FastMCP) -> None:
                     return (
                         f"DRY-RUN: Would delete episode file id={episode_file_id} "
                         f"'{file.relative_path}' — {format_size(file.size)}.\n"
-                        f"{hardlink_note("Sonarr")}\n"
+                        f"{hardlink_note('Sonarr')}\n"
                         "Set confirm=True to proceed."
                     )
                 await c.delete_episode_file(episode_file_id)

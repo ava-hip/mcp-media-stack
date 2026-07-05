@@ -333,3 +333,270 @@ async def test_delete_episode_file_confirm(monkeypatch):
 
     assert delete_route.called
     assert "freed" in result.lower()
+
+
+# ── Observability tools ───────────────────────────────────────────────────────
+# The disk_space / health / history / delete_queue_item helpers live in the shared
+# ArrClient base, so they are exercised in depth here (Sonarr) and only smoke-tested
+# on the Radarr side (see tests/test_radarr.py).
+
+
+@respx.mock
+async def test_disk_space_sorted_and_formatted(monkeypatch):
+    payload = [
+        {"path": "/media", "label": "Media", "freeSpace": 30 * GIB, "totalSpace": 100 * GIB},
+        {
+            "path": "/downloads",
+            "label": "Downloads",
+            "freeSpace": 10 * GIB,
+            "totalSpace": 100 * GIB,
+        },
+    ]
+    respx.get(f"{BASE}/diskspace").mock(return_value=Response(200, json=payload))
+
+    fn = _seasons_tool("sonarr_disk_space", monkeypatch)
+    result = await fn()
+
+    # Fullest volume (lowest % free) listed first.
+    assert result.index("Downloads") < result.index("Media")
+    assert "10.0 GB free / 100.0 GB" in result
+    assert "(10% free)" in result
+    assert "(30% free)" in result
+
+
+@respx.mock
+async def test_disk_space_empty(monkeypatch):
+    respx.get(f"{BASE}/diskspace").mock(return_value=Response(200, json=[]))
+
+    fn = _seasons_tool("sonarr_disk_space", monkeypatch)
+    result = await fn()
+
+    assert "no disk space information" in result.lower()
+
+
+@respx.mock
+async def test_health_with_issues(monkeypatch):
+    payload = [
+        {"source": "DownloadClientCheck", "type": "warning", "message": "No download client"},
+        {"source": "IndexerStatusCheck", "type": "error", "message": "Indexers down"},
+    ]
+    respx.get(f"{BASE}/health").mock(return_value=Response(200, json=payload))
+
+    fn = _seasons_tool("sonarr_health", monkeypatch)
+    result = await fn()
+
+    assert "[warning] DownloadClientCheck: No download client" in result
+    assert "[error] IndexerStatusCheck: Indexers down" in result
+
+
+@respx.mock
+async def test_health_empty(monkeypatch):
+    respx.get(f"{BASE}/health").mock(return_value=Response(200, json=[]))
+
+    fn = _seasons_tool("sonarr_health", monkeypatch)
+    result = await fn()
+
+    assert "no health issues" in result.lower()
+
+
+@respx.mock
+async def test_history_pagination_and_download_id(monkeypatch):
+    payload = {
+        "page": 1,
+        "pageSize": 5,
+        "totalRecords": 2,
+        "records": [
+            {
+                "eventType": "grabbed",
+                "sourceTitle": "Show.S01E01",
+                "date": "2026-07-05T10:00:00Z",
+                "downloadId": "ABC123HASH",
+            },
+            {
+                "eventType": "seriesFolderImported",
+                "sourceTitle": "Show.S01E02",
+                "date": "2026-07-05T09:00:00Z",
+            },
+        ],
+    }
+    route = respx.get(f"{BASE}/history").mock(return_value=Response(200, json=payload))
+
+    fn = _seasons_tool("sonarr_history", monkeypatch)
+    result = await fn(limit=5)
+
+    params = route.calls.last.request.url.params
+    assert params["pageSize"] == "5"
+    assert params["sortKey"] == "date"
+    assert params["sortDirection"] == "descending"
+    assert "eventType" not in params  # no filter passed
+
+    # downloadId surfaced when present, handled when absent.
+    assert "downloadId=ABC123HASH" in result
+    assert "no downloadId" in result
+
+
+def _history_record(event_type: str, title: str, download_id: str | None = None) -> dict:
+    rec = {"eventType": event_type, "sourceTitle": title, "date": "2026-07-05T10:00:00Z"}
+    if download_id is not None:
+        rec["downloadId"] = download_id
+    return rec
+
+
+def _mixed_history() -> dict:
+    records = [
+        _history_record("grabbed", "Show.S01E01", "HASH1"),
+        _history_record("downloadFolderImported", "Show.S01E01"),
+        _history_record("episodeFileDeleted", "Show.S01E02"),
+        _history_record("grabbed", "Show.S01E03", "HASH3"),
+        _history_record("downloadFailed", "Show.S01E04"),
+    ]
+    return {"page": 1, "pageSize": 100, "totalRecords": len(records), "records": records}
+
+
+@respx.mock
+async def test_history_filter_by_alias_grabbed(monkeypatch):
+    route = respx.get(f"{BASE}/history").mock(return_value=Response(200, json=_mixed_history()))
+
+    fn = _seasons_tool("sonarr_history", monkeypatch)
+    result = await fn(limit=20, event_type="grabbed")
+
+    # Filtering is client-side: the API must never receive an eventType query param.
+    assert "eventType" not in route.calls.last.request.url.params
+    # Only the two grabbed records survive.
+    assert "Show.S01E01" in result
+    assert "Show.S01E03" in result
+    assert "downloadFolderImported" not in result
+    assert "episodeFileDeleted" not in result
+    assert "downloadFailed" not in result
+    # downloadId still surfaced on grabbed records.
+    assert "downloadId=HASH1" in result
+    assert "downloadId=HASH3" in result
+
+
+@respx.mock
+async def test_history_alias_imported(monkeypatch):
+    respx.get(f"{BASE}/history").mock(return_value=Response(200, json=_mixed_history()))
+
+    fn = _seasons_tool("sonarr_history", monkeypatch)
+    result = await fn(limit=20, event_type="imported")
+
+    assert "downloadFolderImported" in result
+    assert "grabbed" not in result
+    assert "episodeFileDeleted" not in result
+
+
+@respx.mock
+async def test_history_canonical_string_accepted(monkeypatch):
+    respx.get(f"{BASE}/history").mock(return_value=Response(200, json=_mixed_history()))
+
+    fn = _seasons_tool("sonarr_history", monkeypatch)
+    result = await fn(limit=20, event_type="downloadFailed")
+
+    assert "downloadFailed" in result
+    assert "Show.S01E04" in result
+    assert "downloadFolderImported" not in result
+
+
+@respx.mock
+async def test_history_unknown_event_type_no_api_call(monkeypatch):
+    route = respx.get(f"{BASE}/history").mock(return_value=Response(200, json=_mixed_history()))
+
+    fn = _seasons_tool("sonarr_history", monkeypatch)
+    result = await fn(limit=20, event_type="foo")
+
+    assert not route.called
+    assert "unknown event_type 'foo'" in result.lower()
+    # The error lists the accepted aliases.
+    assert "grabbed" in result
+    assert "imported" in result
+    assert "deleted" in result
+
+
+@respx.mock
+async def test_history_window_not_filled_adds_note(monkeypatch):
+    respx.get(f"{BASE}/history").mock(return_value=Response(200, json=_mixed_history()))
+
+    fn = _seasons_tool("sonarr_history", monkeypatch)
+    result = await fn(limit=20, event_type="grabbed")
+
+    # Only 2 grabbed matches against a limit of 20 -> note about the searched window.
+    assert "showing 2 of up to 20" in result
+    assert "most recent events" in result
+
+
+@respx.mock
+async def test_history_no_filter_no_eventtype_param(monkeypatch):
+    respx.get(f"{BASE}/history").mock(return_value=Response(200, json=_mixed_history()))
+
+    fn = _seasons_tool("sonarr_history", monkeypatch)
+    result = await fn(limit=20)
+
+    # No filter -> all records returned, no note.
+    assert "showing" not in result
+    assert "grabbed" in result
+    assert "downloadFailed" in result
+
+
+def _queue_payload() -> dict:
+    return {
+        "page": 1,
+        "pageSize": 100,
+        "totalRecords": 1,
+        "records": [
+            {
+                "id": 77,
+                "title": "Stuck.Release.S01E01",
+                "status": "stalled",
+                "size": 2 * GIB,
+                "sizeleft": 1 * GIB,
+                "timeleft": None,
+            }
+        ],
+    }
+
+
+@respx.mock
+async def test_delete_queue_item_dry_run(monkeypatch):
+    respx.get(f"{BASE}/queue").mock(return_value=Response(200, json=_queue_payload()))
+    delete_route = respx.delete(url__regex=rf"{BASE}/queue/\d+").mock(
+        return_value=Response(200, json={})
+    )
+
+    fn = _seasons_tool("sonarr_delete_queue_item", monkeypatch)
+    result = await fn(queue_id=77, remove_from_client=True, blocklist=False, confirm=False)
+
+    assert not delete_route.called
+    assert "DRY-RUN" in result
+    assert "Stuck.Release.S01E01" in result
+    assert "status=stalled" in result
+    assert "removed from the download client" in result.lower()
+    assert "not be blocklisted" in result.lower()
+
+
+@respx.mock
+async def test_delete_queue_item_not_found(monkeypatch):
+    respx.get(f"{BASE}/queue").mock(return_value=Response(200, json=_queue_payload()))
+    delete_route = respx.delete(url__regex=rf"{BASE}/queue/\d+").mock(
+        return_value=Response(200, json={})
+    )
+
+    fn = _seasons_tool("sonarr_delete_queue_item", monkeypatch)
+    result = await fn(queue_id=999, confirm=True)
+
+    assert not delete_route.called
+    assert "not found in queue" in result.lower()
+
+
+@respx.mock
+async def test_delete_queue_item_confirm_passes_query_params(monkeypatch):
+    respx.get(f"{BASE}/queue").mock(return_value=Response(200, json=_queue_payload()))
+    delete_route = respx.delete(f"{BASE}/queue/77").mock(return_value=Response(200, json={}))
+
+    fn = _seasons_tool("sonarr_delete_queue_item", monkeypatch)
+    result = await fn(queue_id=77, remove_from_client=True, blocklist=True, confirm=True)
+
+    assert delete_route.called
+    params = delete_route.calls.last.request.url.params
+    assert params["removeFromClient"] == "true"
+    assert params["blocklist"] == "true"
+    assert "Removed queue item [77]" in result

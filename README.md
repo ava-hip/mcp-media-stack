@@ -73,7 +73,11 @@ Remplacer `/chemin/absolu/media-mcp` par le chemin réel du projet.
 | `sonarr_lookup_series(term)` | read | Recherche une série (pour ajout) |
 | `sonarr_quality_profiles` | read | Profils de qualité disponibles |
 | `sonarr_root_folders` | read | Dossiers racine configurés |
-| `sonarr_queue` | read | File de téléchargement en cours |
+| `sonarr_queue` | read | File de téléchargement en cours (avec l'ID de chaque élément) |
+| `sonarr_disk_space` | read | Espace disque par volume, le plus plein en premier |
+| `sonarr_health` | read | Avertissements de santé de l'instance |
+| `sonarr_history(limit=20, event_type=None)` | read | Événements récents (grab/import/…) avec downloadId ; filtre `event_type` optionnel (voir ci-dessous) |
+| `sonarr_delete_queue_item(queue_id, remove_from_client=True, blocklist=False, confirm=False)` | write | Retire un élément de la queue |
 | `sonarr_upcoming(days=7)` | read | Épisodes à venir via calendrier |
 | `sonarr_series_seasons(series_id)` | read | Détail saison par saison d'une série |
 | `sonarr_add_series(tvdb_id, quality_profile_id, root_folder_path, confirm=False)` | write | Ajoute une série |
@@ -91,7 +95,11 @@ Remplacer `/chemin/absolu/media-mcp` par le chemin réel du projet.
 | `radarr_lookup_movie(term)` | read | Recherche un film (pour ajout) |
 | `radarr_quality_profiles` | read | Profils de qualité disponibles |
 | `radarr_root_folders` | read | Dossiers racine configurés |
-| `radarr_queue` | read | File de téléchargement en cours |
+| `radarr_queue` | read | File de téléchargement en cours (avec l'ID de chaque élément) |
+| `radarr_disk_space` | read | Espace disque par volume, le plus plein en premier |
+| `radarr_health` | read | Avertissements de santé de l'instance |
+| `radarr_history(limit=20, event_type=None)` | read | Événements récents (grab/import/…) avec downloadId ; filtre `event_type` optionnel (voir ci-dessous) |
+| `radarr_delete_queue_item(queue_id, remove_from_client=True, blocklist=False, confirm=False)` | write | Retire un élément de la queue |
 | `radarr_upcoming(days=7)` | read | Films à venir via calendrier |
 | `radarr_add_movie(tmdb_id, quality_profile_id, root_folder_path, confirm=False)` | write | Ajoute un film |
 | `radarr_set_movie_monitoring(movie_id, monitored)` | write | (Dé)monitore un film |
@@ -110,6 +118,26 @@ Toutes les actions à effet de bord (`add_*`, `delete_*`, `search_*`) acceptent 
 > Sonarr/Radarr uniquement. Si les fichiers sont en hardlink avec un client torrent,
 > l'espace disque n'est **pas** libéré tant que le torrent n'est pas aussi supprimé côté
 > client. L'aperçu dry-run le rappelle.
+
+### Filtre `event_type` de `*_history`
+
+L'API attend un entier pour son query param `eventType`, donc le filtrage est fait
+**côté client** sur le champ texte `eventType` de chaque événement. `event_type` accepte :
+
+| Alias | Correspond à (`eventType` canonique) |
+|---|---|
+| `grabbed` | `grabbed` |
+| `imported` | `downloadFolderImported` |
+| `failed` | `downloadFailed` |
+| `deleted` | `episodeFileDeleted` (Sonarr) / `movieFileDeleted` (Radarr) |
+| `renamed` | `episodeFileRenamed` (Sonarr) / `movieFileRenamed` (Radarr) |
+| `ignored` | `downloadIgnored` |
+
+La chaîne canonique exacte est aussi acceptée (ex. `event_type="downloadFolderImported"`).
+Une valeur inconnue renvoie un message listant les valeurs valides, sans appel API.
+Comme le filtrage est côté client sur une fenêtre élargie (une requête,
+`pageSize = max(limit*5, 100)`), un résultat filtré partiel ajoute une note
+`showing N of up to {limit} (searched the {window} most recent events)`.
 
 ## Développement
 
