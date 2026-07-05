@@ -1,3 +1,5 @@
+import json
+
 import pytest
 import respx
 from httpx import Response
@@ -93,3 +95,124 @@ async def test_http_error_raises_arr_client_error(client):
     respx.get(f"{BASE}/series").mock(return_value=Response(401, text="Unauthorized"))
     with pytest.raises(ArrClientError, match="401"):
         await client.get_series()
+
+
+def _series_with_seasons() -> dict:
+    return {
+        "id": 7,
+        "title": "Test Show",
+        "seasons": [
+            {
+                "seasonNumber": 0,
+                "monitored": False,
+                "statistics": {"episodeFileCount": 2, "totalEpisodeCount": 3},
+            },
+            {
+                "seasonNumber": 1,
+                "monitored": True,
+                "statistics": {"episodeFileCount": 10, "totalEpisodeCount": 10},
+            },
+            {
+                "seasonNumber": 2,
+                "monitored": True,
+                "statistics": {"episodeFileCount": 4, "totalEpisodeCount": 8},
+            },
+        ],
+    }
+
+
+def _seasons_tool(name: str, monkeypatch):
+    # Point the tool's client factory at the mocked test server.
+    monkeypatch.setattr(
+        "media_mcp.tools.sonarr_tools._client",
+        lambda: SonarrClient("http://sonarr.test:8989", "test-api-key"),
+    )
+    test_mcp = FastMCP("test")
+    register_sonarr_tools(test_mcp)
+    return test_mcp._tool_manager.get_tool(name).fn
+
+
+@respx.mock
+async def test_series_seasons_summary(monkeypatch):
+    respx.get(f"{BASE}/series/7").mock(return_value=Response(200, json=_series_with_seasons()))
+
+    fn = _seasons_tool("sonarr_series_seasons", monkeypatch)
+    result = await fn(series_id=7)
+
+    assert "Specials" in result
+    # Season 1 is complete (10/10), season 2 is incomplete (4/8).
+    assert "10/10 episodes  (complete)" in result
+    assert "4/8 episodes  (incomplete)" in result
+    # Specials is incomplete (2/3).
+    assert "2/3 episodes  (incomplete)" in result
+
+
+@respx.mock
+async def test_series_seasons_not_found(monkeypatch):
+    respx.get(f"{BASE}/series/99").mock(return_value=Response(404, text="Not Found"))
+
+    fn = _seasons_tool("sonarr_series_seasons", monkeypatch)
+    result = await fn(series_id=99)
+
+    assert "series not found" in result.lower()
+
+
+@respx.mock
+async def test_set_season_monitoring_puts_full_object(monkeypatch):
+    respx.get(f"{BASE}/series/7").mock(return_value=Response(200, json=_series_with_seasons()))
+    put_route = respx.put(f"{BASE}/series/7").mock(
+        return_value=Response(200, json=_series_with_seasons())
+    )
+
+    fn = _seasons_tool("sonarr_set_season_monitoring", monkeypatch)
+    result = await fn(series_id=7, season_number=2, monitored=True)
+
+    assert put_route.called
+    body = json.loads(put_route.calls.last.request.content)
+    by_number = {s["seasonNumber"]: s for s in body["seasons"]}
+    # Target season flipped to monitored=True.
+    assert by_number[2]["monitored"] is True
+    # Other seasons untouched.
+    assert by_number[0]["monitored"] is False
+    assert by_number[1]["monitored"] is True
+    assert "season 2 is now monitored" in result.lower()
+
+
+@respx.mock
+async def test_set_season_monitoring_unknown_season(monkeypatch):
+    respx.get(f"{BASE}/series/7").mock(return_value=Response(200, json=_series_with_seasons()))
+    put_route = respx.put(f"{BASE}/series/7").mock(return_value=Response(200, json={}))
+
+    fn = _seasons_tool("sonarr_set_season_monitoring", monkeypatch)
+    result = await fn(series_id=7, season_number=9, monitored=True)
+
+    assert not put_route.called
+    assert "not found" in result.lower()
+    assert "0, 1, 2" in result
+
+
+@respx.mock
+async def test_search_season_dry_run_does_not_post(monkeypatch):
+    respx.get(f"{BASE}/series/7").mock(return_value=Response(200, json=_series_with_seasons()))
+    command_route = respx.post(f"{BASE}/command").mock(return_value=Response(201, json={}))
+
+    fn = _seasons_tool("sonarr_search_season", monkeypatch)
+    result = await fn(series_id=7, season_number=2, confirm=False)
+
+    assert not command_route.called
+    assert "DRY-RUN" in result
+    assert "8 episodes" in result
+
+
+@respx.mock
+async def test_search_season_confirm_posts_command(monkeypatch):
+    respx.get(f"{BASE}/series/7").mock(return_value=Response(200, json=_series_with_seasons()))
+    command_route = respx.post(f"{BASE}/command").mock(return_value=Response(201, json={}))
+
+    fn = _seasons_tool("sonarr_search_season", monkeypatch)
+    result = await fn(series_id=7, season_number=2, confirm=True)
+
+    assert command_route.called
+    body = json.loads(command_route.calls.last.request.content)
+    assert body == {"name": "SeasonSearch", "seriesId": 7, "seasonNumber": 2}
+    assert "launched" in result.lower()

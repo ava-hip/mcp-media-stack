@@ -12,6 +12,21 @@ class SonarrClient(ArrClient):
     async def get_series(self) -> list[dict[str, Any]]:
         return await self._get("/series")
 
+    async def get_series_by_id(self, series_id: int) -> dict[str, Any]:
+        """Return the full series object (includes the seasons array)."""
+        return await self._get(f"/series/{series_id}")
+
+    async def update_series(self, series_id: int, body: dict[str, Any]) -> dict[str, Any]:
+        """PUT the complete series object back to Sonarr (no partial patch)."""
+        return await self._put(f"/series/{series_id}", body)
+
+    async def season_search(self, series_id: int, season_number: int) -> dict[str, Any]:
+        """Trigger a search/download of a whole season."""
+        return await self._post(
+            "/command",
+            {"name": "SeasonSearch", "seriesId": series_id, "seasonNumber": season_number},
+        )
+
     async def lookup_series(self, term: str) -> list[dict[str, Any]]:
         return await self._get("/series/lookup", term=term)
 

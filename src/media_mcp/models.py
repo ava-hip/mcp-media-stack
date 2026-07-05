@@ -40,6 +40,15 @@ class SeriesSummary(BaseModel):
     tvdb_id: int
 
 
+class SeasonSummary(BaseModel):
+    season_number: int
+    monitored: bool
+    episode_file_count: int
+    total_episode_count: int
+    is_complete: bool
+    is_specials: bool
+
+
 class SeriesLookupResult(BaseModel):
     title: str
     year: int

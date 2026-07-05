@@ -45,6 +45,20 @@ class ArrClient:
                 f"HTTP {e.response.status_code} on POST {path}: {e.response.text}"
             ) from e
 
+    async def _put(self, path: str, body: dict[str, Any]) -> Any:
+        try:
+            response = await self._client.put(f"{self._base}{path}", json=body)
+            response.raise_for_status()
+            return response.json()
+        except httpx.TimeoutException as e:
+            raise ArrClientError(f"Request timed out: PUT {path}") from e
+        except httpx.ConnectError as e:
+            raise ArrClientError(f"Cannot connect to service at {self._base}") from e
+        except httpx.HTTPStatusError as e:
+            raise ArrClientError(
+                f"HTTP {e.response.status_code} on PUT {path}: {e.response.text}"
+            ) from e
+
     async def _delete(self, path: str, **params: Any) -> None:
         try:
             response = await self._client.delete(f"{self._base}{path}", params=params)

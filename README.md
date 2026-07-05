@@ -75,7 +75,10 @@ Remplacer `/chemin/absolu/media-mcp` par le chemin réel du projet.
 | `sonarr_root_folders` | read | Dossiers racine configurés |
 | `sonarr_queue` | read | File de téléchargement en cours |
 | `sonarr_upcoming(days=7)` | read | Épisodes à venir via calendrier |
+| `sonarr_series_seasons(series_id)` | read | Détail saison par saison d'une série |
 | `sonarr_add_series(tvdb_id, quality_profile_id, root_folder_path, confirm=False)` | write | Ajoute une série |
+| `sonarr_set_season_monitoring(series_id, season_number, monitored)` | write | (Dé)monitore une saison précise |
+| `sonarr_search_season(series_id, season_number, confirm=False)` | write | Lance la recherche d'une saison |
 | `sonarr_delete_series(series_id, delete_files=False, confirm=False)` | destructive | Supprime une série |
 
 ### Radarr

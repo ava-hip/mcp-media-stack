@@ -10,10 +10,26 @@ from media_mcp.models import (
     QualityProfile,
     QueueItem,
     RootFolder,
+    SeasonSummary,
     SeriesLookupResult,
     SeriesSummary,
     SystemStatus,
 )
+
+
+def _season_summary(season: dict) -> SeasonSummary:
+    stats = season.get("statistics", {})
+    file_count = stats.get("episodeFileCount", 0)
+    total_count = stats.get("totalEpisodeCount", 0)
+    season_number = season.get("seasonNumber", 0)
+    return SeasonSummary(
+        season_number=season_number,
+        monitored=season.get("monitored", False),
+        episode_file_count=file_count,
+        total_episode_count=total_count,
+        is_complete=total_count > 0 and file_count == total_count,
+        is_specials=season_number == 0,
+    )
 
 
 def _client() -> SonarrClient:
@@ -249,3 +265,106 @@ def register_sonarr_tools(mcp: FastMCP) -> None:
             return f"Deleted series id={series_id} from Sonarr (delete_files={delete_files})."
         except ArrClientError as e:
             return f"Error: {e}"
+
+    @mcp.tool()
+    async def sonarr_series_seasons(series_id: int) -> str:
+        """Show a season-by-season breakdown of an already-tracked series.
+
+        For each season: number, whether it is monitored, episodes present/total,
+        and whether it is complete. Season 0 is labelled as Specials.
+        """
+        try:
+            async with _client() as c:
+                data = await c.get_series_by_id(series_id)
+        except ArrClientError as e:
+            if "404" in str(e):
+                return f"Error: series not found (id={series_id})."
+            return f"Error: {e}"
+
+        seasons = [_season_summary(s) for s in data.get("seasons", [])]
+        if not seasons:
+            return f"Series '{data.get('title', series_id)}' has no seasons."
+
+        lines = [f"Seasons for '{data.get('title', series_id)}' (id={series_id}):"]
+        for s in sorted(seasons, key=lambda x: x.season_number):
+            label = "Specials" if s.is_specials else f"Season {s.season_number}"
+            state = "complete" if s.is_complete else "incomplete"
+            lines.append(
+                f"  [{'x' if s.monitored else ' '}] {label:<10}  "
+                f"{s.episode_file_count}/{s.total_episode_count} episodes  ({state})"
+            )
+        return "\n".join(lines)
+
+    @mcp.tool()
+    async def sonarr_set_season_monitoring(
+        series_id: int,
+        season_number: int,
+        monitored: bool,
+    ) -> str:
+        """Enable or disable monitoring for a single season of a series.
+
+        Reversible action with no immediate grab, so no confirm is required.
+        Returns the season state after the change.
+        """
+        try:
+            async with _client() as c:
+                series = await c.get_series_by_id(series_id)
+                seasons = series.get("seasons", [])
+                target = next(
+                    (s for s in seasons if s.get("seasonNumber") == season_number), None
+                )
+                if target is None:
+                    available = ", ".join(str(s.get("seasonNumber")) for s in seasons) or "none"
+                    return (
+                        f"Error: season {season_number} not found in series id={series_id}. "
+                        f"Available seasons: {available}."
+                    )
+                target["monitored"] = monitored
+                await c.update_series(series_id, series)
+        except ArrClientError as e:
+            if "404" in str(e):
+                return f"Error: series not found (id={series_id})."
+            return f"Error: {e}"
+
+        label = "Specials" if season_number == 0 else f"season {season_number}"
+        state = "monitored" if monitored else "unmonitored"
+        return f"'{series.get('title', series_id)}' — {label} is now {state}."
+
+    @mcp.tool()
+    async def sonarr_search_season(
+        series_id: int,
+        season_number: int,
+        confirm: bool = False,
+    ) -> str:
+        """Trigger a search/download for a whole season.
+
+        Set confirm=True to actually launch the search; omit or set False for a
+        dry-run preview of what would be searched.
+        """
+        try:
+            async with _client() as c:
+                series = await c.get_series_by_id(series_id)
+                seasons = series.get("seasons", [])
+                target = next(
+                    (s for s in seasons if s.get("seasonNumber") == season_number), None
+                )
+                if target is None:
+                    available = ", ".join(str(s.get("seasonNumber")) for s in seasons) or "none"
+                    return (
+                        f"Error: season {season_number} not found in series id={series_id}. "
+                        f"Available seasons: {available}."
+                    )
+                title = series.get("title", series_id)
+                episode_count = target.get("statistics", {}).get("totalEpisodeCount", 0)
+                if not confirm:
+                    return (
+                        f"DRY-RUN: Would search season {season_number} of '{title}' "
+                        f"({episode_count} episodes). Set confirm=True to proceed."
+                    )
+                await c.season_search(series_id, season_number)
+        except ArrClientError as e:
+            if "404" in str(e):
+                return f"Error: series not found (id={series_id})."
+            return f"Error: {e}"
+
+        return f"Season search launched for season {season_number} of '{title}'."
