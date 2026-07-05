@@ -92,7 +92,11 @@ Remplacer `/chemin/absolu/media-mcp` par le chemin réel du projet.
 | `radarr_quality_profiles` | read | Profils de qualité disponibles |
 | `radarr_root_folders` | read | Dossiers racine configurés |
 | `radarr_queue` | read | File de téléchargement en cours |
+| `radarr_upcoming(days=7)` | read | Films à venir via calendrier |
 | `radarr_add_movie(tmdb_id, quality_profile_id, root_folder_path, confirm=False)` | write | Ajoute un film |
+| `radarr_set_movie_monitoring(movie_id, monitored)` | write | (Dé)monitore un film |
+| `radarr_search_movie(movie_id, confirm=False)` | write | Lance la recherche d'un film |
+| `radarr_delete_movie_file(movie_id, confirm=False)` | destructive | Supprime le fichier d'un film (garde le film suivi) |
 | `radarr_delete_movie(movie_id, delete_files=False, confirm=False)` | destructive | Supprime un film |
 
 ### Pattern dry-run / confirm
@@ -101,10 +105,11 @@ Toutes les actions à effet de bord (`add_*`, `delete_*`, `search_*`) acceptent 
 - `confirm=False` (défaut) → aperçu sans exécution (dry-run)
 - `confirm=True` → exécution réelle
 
-> **Note hardlink** : les tools `sonarr_delete_season` / `sonarr_delete_episode_file`
-> retirent les fichiers côté Sonarr uniquement. Si les fichiers sont en hardlink avec
-> un client torrent, l'espace disque n'est **pas** libéré tant que le torrent n'est pas
-> aussi supprimé côté client. L'aperçu dry-run le rappelle.
+> **Note hardlink** : les tools de suppression de fichiers (`sonarr_delete_season`,
+> `sonarr_delete_episode_file`, `radarr_delete_movie_file`) retirent les fichiers côté
+> Sonarr/Radarr uniquement. Si les fichiers sont en hardlink avec un client torrent,
+> l'espace disque n'est **pas** libéré tant que le torrent n'est pas aussi supprimé côté
+> client. L'aperçu dry-run le rappelle.
 
 ## Développement
 

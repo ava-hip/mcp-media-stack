@@ -1,16 +1,35 @@
+from datetime import date, timedelta
+
 from mcp.server.fastmcp import FastMCP
 
 from media_mcp.clients.base import ArrClientError
 from media_mcp.clients.radarr import RadarrClient
 from media_mcp.config import settings
 from media_mcp.models import (
+    CalendarMovie,
+    MovieFileSummary,
     MovieLookupResult,
     MovieSummary,
     QualityProfile,
     QueueItem,
     RootFolder,
     SystemStatus,
+    format_size,
+    hardlink_note
 )
+
+
+def _relevant_release(movie: dict) -> tuple[str, str]:
+    """Return (release_date, release_type) using digital > physical > cinema priority."""
+    for key, label in (
+        ("digitalRelease", "digital"),
+        ("physicalRelease", "physical"),
+        ("inCinemas", "cinema"),
+    ):
+        value = movie.get(key)
+        if value:
+            return value[:10], label
+    return "", "unknown"
 
 
 def _client() -> RadarrClient:
@@ -215,3 +234,129 @@ def register_radarr_tools(mcp: FastMCP) -> None:
             return f"Deleted movie id={movie_id} from Radarr (delete_files={delete_files})."
         except ArrClientError as e:
             return f"Error: {e}"
+
+    @mcp.tool()
+    async def radarr_upcoming(days: int = 7) -> str:
+        """Show movies releasing in the next N days (default 7) via Radarr calendar.
+
+        Uses the most relevant release date available (digital > physical > cinema).
+        """
+        start = date.today().isoformat()
+        end = (date.today() + timedelta(days=days)).isoformat()
+        try:
+            async with _client() as c:
+                data = await c.get_calendar(start=start, end=end)
+        except ArrClientError as e:
+            return f"Error: {e}"
+
+        if not data:
+            return f"No movies releasing in the next {days} days."
+        movies = []
+        for m in data:
+            release_date, release_type = _relevant_release(m)
+            movies.append(
+                CalendarMovie(
+                    title=m.get("title", ""),
+                    year=m.get("year", 0),
+                    release_date=release_date,
+                    release_type=release_type,
+                    monitored=m.get("monitored", False),
+                    has_file=m.get("hasFile", False),
+                )
+            )
+        lines = [f"Upcoming movies ({days} days):"]
+        for mv in sorted(movies, key=lambda x: x.release_date):
+            flag = "✓" if mv.has_file else " "
+            lines.append(
+                f"  [{flag}] {mv.release_date or '????-??-??'} ({mv.release_type})  "
+                f"{mv.title} ({mv.year})  mon={'yes' if mv.monitored else 'no'}"
+            )
+        return "\n".join(lines)
+
+    @mcp.tool()
+    async def radarr_set_movie_monitoring(movie_id: int, monitored: bool) -> str:
+        """Enable or disable monitoring for a single movie.
+
+        Reversible action with no immediate grab, so no confirm is required.
+        Returns the movie state after the change.
+        """
+        try:
+            async with _client() as c:
+                movie = await c.get_movie(movie_id)
+                movie["monitored"] = monitored
+                await c.update_movie(movie_id, movie)
+        except ArrClientError as e:
+            if "404" in str(e):
+                return f"Error: movie not found (id={movie_id})."
+            return f"Error: {e}"
+
+        state = "monitored" if monitored else "unmonitored"
+        return f"'{movie.get('title', movie_id)}' (id={movie_id}) is now {state}."
+
+    @mcp.tool()
+    async def radarr_search_movie(movie_id: int, confirm: bool = False) -> str:
+        """Trigger a search/download for an already-added movie.
+
+        Set confirm=True to actually launch the search; omit or set False for a
+        dry-run preview.
+        """
+        try:
+            async with _client() as c:
+                movie = await c.get_movie(movie_id)
+                title = movie.get("title", movie_id)
+                monitored = movie.get("monitored", False)
+                mon_state = "monitored" if monitored else "not monitored"
+                if not confirm:
+                    return (
+                        f"DRY-RUN: Would search '{title}' ({mon_state}). "
+                        "Set confirm=True to proceed."
+                    )
+                await c.movie_search(movie_id)
+        except ArrClientError as e:
+            if "404" in str(e):
+                return f"Error: movie not found (id={movie_id})."
+            return f"Error: {e}"
+
+        result = f"Search launched for '{title}'."
+        if not monitored:
+            result += " Note: movie is not monitored."
+        return result
+
+    @mcp.tool()
+    async def radarr_delete_movie_file(movie_id: int, confirm: bool = False) -> str:
+        """Delete the movie's file but KEEP the movie tracked in Radarr (destructive).
+
+        Unlike radarr_delete_movie, this only removes the downloaded file, so the movie
+        stays monitored for re-download/upgrade. Set confirm=True to actually delete;
+        omit or set False for a dry-run preview.
+        """
+        try:
+            async with _client() as c:
+                movie = await c.get_movie(movie_id)
+                title = movie.get("title", movie_id)
+                movie_file = movie.get("movieFile")
+                if not movie.get("hasFile") or not movie_file:
+                    return f"No file found for '{title}' (id={movie_id}); nothing to delete."
+
+                file = MovieFileSummary(
+                    id=movie_file["id"],
+                    relative_path=movie_file.get("relativePath", ""),
+                    size=movie_file.get("size", 0),
+                )
+                if not confirm:
+                    return (
+                        f"DRY-RUN: Would delete file for '{title}' — "
+                        f"'{file.relative_path}' ({format_size(file.size)}).\n"
+                        f"{hardlink_note("Radarr")}\n"
+                        "Set confirm=True to proceed."
+                    )
+                await c.delete_movie_file(file.id)
+        except ArrClientError as e:
+            if "404" in str(e):
+                return f"Error: movie not found (id={movie_id})."
+            return f"Error: {e}"
+
+        return (
+            f"Deleted file for '{title}' — '{file.relative_path}', "
+            f"{format_size(file.size)} freed in Radarr. Movie is still tracked."
+        )

@@ -6,7 +6,6 @@ from media_mcp.clients.base import ArrClientError
 from media_mcp.clients.sonarr import SonarrClient
 from media_mcp.config import settings
 from media_mcp.models import (
-    HARDLINK_NOTE,
     CalendarEpisode,
     EpisodeFileSummary,
     QualityProfile,
@@ -17,6 +16,7 @@ from media_mcp.models import (
     SeriesSummary,
     SystemStatus,
     format_size,
+    hardlink_note
 )
 
 
@@ -408,7 +408,7 @@ def register_sonarr_tools(mcp: FastMCP) -> None:
                     return (
                         f"DRY-RUN: Would delete {len(files)} episode file(s) from "
                         f"season {season_number} of '{title}' — {format_size(total_size)} total.\n"
-                        f"{HARDLINK_NOTE}\n"
+                        f"{hardlink_note("Sonarr")}\n"
                         "Set confirm=True to proceed."
                     )
 
@@ -459,7 +459,7 @@ def register_sonarr_tools(mcp: FastMCP) -> None:
                     return (
                         f"DRY-RUN: Would delete episode file id={episode_file_id} "
                         f"'{file.relative_path}' — {format_size(file.size)}.\n"
-                        f"{HARDLINK_NOTE}\n"
+                        f"{hardlink_note("Sonarr")}\n"
                         "Set confirm=True to proceed."
                     )
                 await c.delete_episode_file(episode_file_id)

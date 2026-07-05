@@ -2,10 +2,11 @@ from pydantic import BaseModel
 
 # Static reminder shown in delete previews: Sonarr only removes its own record/file,
 # so hardlinked files keep occupying disk until the torrent is removed in the client too.
-HARDLINK_NOTE = (
-    "Note: files are removed from Sonarr only. If hardlinked to a torrent client, "
-    "disk space is NOT freed until the torrent is also removed there."
-)
+def hardlink_note(service: str) -> str:
+    return (
+        f"Note: files are removed from {service} only. If hardlinked to a torrent "
+        "client, disk space is NOT freed until the torrent is also removed there."
+    )
 
 
 def format_size(num_bytes: int) -> str:
@@ -106,3 +107,18 @@ class MovieLookupResult(BaseModel):
     year: int
     tmdb_id: int
     overview: str
+
+
+class CalendarMovie(BaseModel):
+    title: str
+    year: int
+    release_date: str
+    release_type: str
+    monitored: bool
+    has_file: bool
+
+
+class MovieFileSummary(BaseModel):
+    id: int
+    relative_path: str
+    size: int
