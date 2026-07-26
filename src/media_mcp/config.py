@@ -27,5 +27,12 @@ class Settings(BaseSettings):
     # it is selected automatically; if several exist, resolution raises a clear error.
     qui_instance: str = ""
 
+    # Jellyfin (media server for curated collections / BoxSets). Endpoints live at the
+    # server ROOT (no /api/vN prefix); auth is Authorization: MediaBrowser Token="<key>".
+    # Empty values mean "not configured" — the JellyfinClient raises a clear error and the
+    # server still starts.
+    jellyfin_url: str = ""
+    jellyfin_api_key: str = ""
+
 
 settings = Settings()

@@ -1,7 +1,8 @@
 # media-mcp
 
 Serveur MCP local (transport stdio) pour piloter un stack média self-hosted :
-**Sonarr** + **Radarr**, et **qBittorrent via [qui](https://getqui.com)** (autobrr).
+**Sonarr** + **Radarr**, **qBittorrent via [qui](https://getqui.com)** (autobrr),
+**Prowlarr** (indexeurs) et **Jellyfin** (collections curatives / BoxSets).
 
 ## Prérequis
 
@@ -72,6 +73,8 @@ Remplacer `/chemin/absolu/media-mcp` par le chemin réel du projet.
 | `QUI_INSTANCE` | Instance qBit ciblée (id ou nom) ; vide = auto si une seule | *(optionnel)* |
 | `PROWLARR_URL` | URL de base Prowlarr | *(requis pour Prowlarr)* |
 | `PROWLARR_API_KEY` | Clé API Prowlarr | *(requis pour Prowlarr)* |
+| `JELLYFIN_URL` | URL de base Jellyfin (ex. `http://192.168.1.20:8096`) | *(requis pour Jellyfin)* |
+| `JELLYFIN_API_KEY` | Clé API Jellyfin (Dashboard > API Keys) | *(requis pour Jellyfin)* |
 
 ## Tools disponibles
 
@@ -176,6 +179,78 @@ Categories** du download client, **à configurer dans l'UI Prowlarr** (Settings 
 Clients). S'il n'y a aucun download client, le grab renvoie un message clair (à ajouter d'abord
 dans l'UI). La recherche/le grab avec catégorie explicite restent gérés côté Prowlarr, pas ici.
 
+### Jellyfin (collections curatives / BoxSets)
+
+Serveur média Jellyfin — **endpoints à la racine du serveur** (pas de préfixe `/api/vN`),
+auth par header `Authorization: MediaBrowser Token="<clé>"`. Objectif : créer et gérer des
+**collections curatives (BoxSets)** avec description, pilotables en langage naturel.
+
+> Client **autonome** (ne dérive PAS d'`ArrClient`, comme `QuiClient`) : Jellyfin n'est pas
+> une API *arr. Le `userId` requis par les endpoints d'items est résolu une fois (premier
+> compte `Policy.IsAdministrator` via `GET /Users`) puis mis en cache pour la durée du process.
+
+| Tool | Type | Description |
+|---|---|---|
+| `jellyfin_system_status` | read | Nom + version du serveur (valide la clé API) |
+| `jellyfin_list_movies` | read | Films de la bibliothèque (short id, titre, année, tmdbId) |
+| `jellyfin_list_collections` | read | Collections/BoxSets (short id, nom, nb d'items, description tronquée) |
+| `jellyfin_collection_items(collection_ref)` | read | Contenu d'une collection (par nom ou id) |
+| `jellyfin_create_collection(name, movies, overview=None, confirm=False)` | write | Crée une collection depuis une liste de films ; option description (verrouillée) |
+| `jellyfin_add_to_collection(collection_ref, movies, confirm=False)` | write | Ajoute des films à une collection |
+| `jellyfin_remove_from_collection(collection_ref, movies, confirm=False)` | write | Retire des films d'une collection (les films restent en bibliothèque) |
+| `jellyfin_set_overview(item_ref, overview, lock=True, confirm=False)` | write | Écrit la description d'un item (collection ou film) ; `lock` la protège d'un refresh |
+| `jellyfin_delete_collection(collection_ref, confirm=False)` | destructive | Supprime le conteneur collection (les films sont conservés) |
+
+#### Résolution des films (`movies`) et références (`collection_ref` / `item_ref`)
+
+Le paramètre `movies` accepte une **liste mixte** : `tmdbId` numériques, ids Jellyfin (ou
+**préfixe unique** de 8 car.), ou **titres approximatifs** (casse/accents/articles/ponctuation
+normalisés — « Le Solitaire » ≈ « solitaire »). La résolution est une **cascade** qui s'arrête
+au premier niveau donnant un match unique :
+
+1. `tmdbId` exact (via `ProviderIds.Tmdb`)
+2. id Jellyfin, ou préfixe unique
+3. `Name` Jellyfin normalisé
+4. `OriginalTitle` Jellyfin normalisé
+5. **repli Radarr** — Radarr connaît les titres localisés/alternatifs (`title`,
+   `originalTitle`, `alternateTitles`) que Jellyfin n'indexe parfois que sous un titre anglais.
+   Le titre demandé y est matché, son `tmdbId` récupéré, puis rebranché sur Jellyfin par
+   `tmdbId`. Utilise le **client Radarr interne** (jamais un appel vers nos propres tools MCP) ;
+   si Radarr n'est pas configuré ou est injoignable, le niveau 5 est **simplement sauté**
+   (`not_found` propre, aucune exception).
+
+La règle est identique à **chaque** niveau : un seul candidat → *matched* ; plusieurs →
+*ambiguous* (candidats remontés, **jamais** un choix arbitraire) ; aucun → niveau suivant.
+
+Chaque `movies` déclenche **au plus un** fetch bibliothèque Jellyfin + **au plus un** fetch
+Radarr (ce dernier uniquement si une référence atteint le niveau 5, en lazy). Les dry-runs
+(`confirm=False`) affichent exactement les films **matched / ambiguous / not found** avant toute
+écriture, avec une **colonne indiquant le moyen de résolution** (`tmdb` / `id` / `title` /
+`original-title` / `via-radarr`) ; un match `via-radarr` (le plus faillible) affiche en clair le
+titre Radarr ET le titre Jellyfin retenus. Sur `confirm=True`, une création/modification
+**refuse de procéder** si des références restent non résolues (pas de collection partielle en
+silence). `ProviderIds.Tmdb` est le pont fiable avec le `tmdbId` Radarr (jamais de match sur le
+titre en interne quand un tmdbId existe).
+
+#### Pièges Jellyfin gérés
+
+- **`POST /Items/{id}` = GET-modify-POST du BaseItemDto complet** (pas de PATCH). Un DTO
+  partiel renvoie 400 et peut **corrompre l'item** jusqu'au prochain rescan (champs collection
+  `null` passés à `.ToList()`). Avant tout envoi, les champs tableau (`Tags`, `Genres`, `Studios`,
+  `People`, `LockedFields`, `GenreItems`, `TagItems`…) sont **normalisés en `[]`** (jamais `null`)
+  et `ProviderIds` en `{}` (map, pas liste). Un test respx vérifie explicitement qu'aucun `null`
+  ne part dans un champ tableau.
+- **Verrouillage** : après écriture d'un `Overview`, `"Overview"` est ajouté à `LockedFields`
+  (verrou au niveau champ) pour qu'un refresh de métadonnées n'écrase pas la description.
+  Comportement par défaut, désactivable via `lock=False`.
+- **Bibliothèque « Collections » absente** : `POST /Collections` peut renvoyer une 500
+  (`Sequence contains no elements`) ; c'est traduit en message actionnable (créer une première
+  collection depuis l'UI web) plutôt qu'une erreur brute.
+
+> **Cadrage** : l'upload d'affiche (`jellyfin_set_collection_image`) n'est **pas** dans cette
+> itération — la place est prévue dans l'architecture (`POST /Items/{id}/Images/Primary`,
+> corps base64 + `Content-Type` réel), à ajouter ensuite.
+
 ### Tools coordonnés — purge « partout »
 
 Suppriment, en un geste avec aperçu et `confirm`, **les fichiers bibliothèque (Sonarr/Radarr)
@@ -275,6 +350,7 @@ src/media_mcp/
   config.py          # pydantic-settings — lit les variables d'env
   models.py          # modèles pydantic pour les réponses simplifiées
   coordinated.py     # service d'orchestration purge (arr + qui), logique lourde
+  jellyfin_resolve.py   # résolution en cascade (tmdbId/id/Name/OriginalTitle + repli Radarr injecté)
   server.py          # instancie FastMCP et enregistre tous les tools
   __main__.py        # entrypoint: python -m media_mcp
   clients/
@@ -283,12 +359,14 @@ src/media_mcp/
     radarr.py        # RadarrClient(ArrClient)
     prowlarr.py      # ProwlarrClient(ArrClient) — /api/v1
     qui.py           # QuiClient: httpx async, header X-API-Key (NE dérive PAS d'ArrClient)
+    jellyfin.py      # JellyfinClient: root path, MediaBrowser Token (NE dérive PAS d'ArrClient)
   tools/
     sonarr_tools.py  # @mcp.tool pour Sonarr
     radarr_tools.py  # @mcp.tool pour Radarr
     qbit_tools.py    # @mcp.tool pour qBittorrent via qui
     prowlarr_tools.py     # @mcp.tool pour Prowlarr (indexeurs)
     coordinated_tools.py  # @mcp.tool purge saison/film "partout" (arr + qui)
+    jellyfin_tools.py     # @mcp.tool pour Jellyfin (collections curatives / BoxSets)
 ```
 
 Ajouter un nouveau service (ex. Jellyseerr) : créer `clients/jellyseerr.py` et
