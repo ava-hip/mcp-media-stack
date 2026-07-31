@@ -1,8 +1,11 @@
 # media-mcp
 
-Serveur MCP local (transport stdio) pour piloter un stack média self-hosted :
+Serveur MCP pour piloter un stack média self-hosted :
 **Sonarr** + **Radarr**, **qBittorrent via [qui](https://getqui.com)** (autobrr),
 **Prowlarr** (indexeurs) et **Jellyfin** (collections curatives / BoxSets).
+
+Deux transports : **stdio** (défaut, dev local / Claude Desktop) et **HTTP** (service Docker
+sur le homelab). Voir [Déploiement](#déploiement).
 
 ## Prérequis
 
@@ -29,7 +32,14 @@ cp .env.example .env
 uv run python -m media_mcp
 ```
 
-Le serveur démarre en mode stdio et attend des messages MCP sur stdin/stdout.
+Le serveur démarre en mode **stdio** (défaut) et attend des messages MCP sur stdin/stdout.
+
+Pour le lancer en HTTP localement :
+
+```bash
+MCP_TRANSPORT=http PORT=8080 uv run python -m media_mcp
+# endpoint MCP : http://127.0.0.1:8080/mcp
+```
 
 ## Configuration Claude Desktop
 
@@ -64,6 +74,9 @@ Remplacer `/chemin/absolu/media-mcp` par le chemin réel du projet.
 
 | Variable | Description | Défaut |
 |---|---|---|
+| `MCP_TRANSPORT` | Transport : `stdio`, `http` (= streamable-http) ou `sse` | `stdio` |
+| `HOST` | Interface d'écoute (transports HTTP uniquement) | `0.0.0.0` |
+| `PORT` | Port d'écoute (transports HTTP uniquement) | `8080` |
 | `SONARR_URL` | URL de base Sonarr | `http://localhost:8989` |
 | `SONARR_API_KEY` | Clé API Sonarr | *(requis)* |
 | `RADARR_URL` | URL de base Radarr | `http://localhost:7878` |
@@ -332,6 +345,74 @@ ligne `ids: …` (les queue IDs individuels du groupe, tronquée si trop longue)
 (**tous** les items du download, retirés en un seul `DELETE /queue/bulk`) ; en dry-run il liste
 le nombre d'items, leur(s) titre(s) et les IDs ciblés avant toute suppression.
 
+## Déploiement
+
+### ⚠️ Sécurité — l'image GHCR est PUBLIQUE
+
+- **Ne jamais mettre de secret dans l'image**, le `Dockerfile`, un workflow ou un fichier
+  suivi par git. Toutes les clés et URLs arrivent **au runtime** (`env_file` / `environment`
+  / `docker run -e`). Le `Dockerfile` ne déclare que `MCP_TRANSPORT`, `HOST` et `PORT`.
+- `.dockerignore` exclut `.env*`, `.git`, `tests/`, `.venv`… : rien de sensible n'entre dans
+  le build context.
+- `.gitignore` exclut `.env`, ses variantes et le vrai `docker-compose.yml`. Seuls
+  `.env.example` et `docker-compose.example.yml` (placeholders) sont committés.
+- **Les URLs configurées doivent être les URLs INTERNES du homelab**
+  (`http://sonarr:8989`, `http://qui:7476`…), **jamais les URLs Cloudflare/publiques** :
+  elles ne doivent ni fuiter ni faire transiter le trafic par l'extérieur.
+- Le serveur MCP n'a **aucune authentification** : ne pas publier son port hors du homelab.
+
+### Transports
+
+| `MCP_TRANSPORT` | Transport FastMCP | Usage |
+|---|---|---|
+| `stdio` *(défaut)* | stdio | Dev local, Claude Desktop |
+| `http` | streamable-http | Service Docker — endpoint `/mcp` |
+| `sse` | sse | Clients MCP qui ne parlent que l'ancien transport — endpoint `/sse` |
+
+Le défaut reste `stdio` : la config Claude Desktop existante fonctionne sans changement.
+Une valeur inconnue fait échouer le démarrage avec la liste des valeurs acceptées.
+
+### Build & run Docker
+
+```bash
+docker build -t media-mcp:local .
+
+# L'image démarre en HTTP sur 8080 (MCP_TRANSPORT=http est le défaut DANS l'image)
+docker run --rm -p 127.0.0.1:8080:8080 --env-file .env media-mcp:local
+```
+
+L'image est multi-stage (deps résolues par `uv`, puis seul le venv est copié), tourne en
+**non-root** (uid 10001) et n'embarque ni les tests, ni `.env`, ni `.git`.
+
+### docker-compose (homelab)
+
+```bash
+cp docker-compose.example.yml docker-compose.yml   # le vrai compose est gitignoré
+cp .env.example .env                                # puis remplir avec les URLs INTERNES
+docker compose up -d
+```
+
+**Réseau** : `media-mcp` doit être sur **le même réseau Docker** que les services
+*arr / qui / Prowlarr / Jellyfin pour les joindre par nom de conteneur. Le compose
+d'exemple s'attache à un réseau `external` — le remplacer par le réseau réel
+(`docker network ls`). Si le client MCP (Hermes) tourne dans ce même réseau, il joint
+`http://media-mcp:8080/mcp` directement : inutile de publier le port.
+
+### CI/CD (GitHub Actions)
+
+| Workflow | Déclencheur | Ce qu'il fait |
+|---|---|---|
+| [`ci.yml`](.github/workflows/ci.yml) | PR vers `main` | `uv sync` → `ruff check` → `pytest`, puis build de l'image **sans push** |
+| [`release.yml`](.github/workflows/release.yml) | push sur `main` | build **et** push vers `ghcr.io/<owner>/<repo>`, tags `latest` + SHA du commit |
+
+L'auth GHCR passe par le `GITHUB_TOKEN` intégré (`permissions: packages: write`) : **aucun
+PAT ni secret perso à stocker**. Les workflows ne contiennent aucun secret applicatif — ils
+buildent l'image, ils ne la font pas tourner.
+
+> **Rendre le package public** (une seule fois, après le premier push) : GitHub → onglet
+> *Packages* → `media-mcp` → *Package settings* → *Change visibility* → **Public**.
+> Les packages GHCR sont privés par défaut.
+
 ## Développement
 
 ```bash
@@ -351,8 +432,8 @@ src/media_mcp/
   models.py          # modèles pydantic pour les réponses simplifiées
   coordinated.py     # service d'orchestration purge (arr + qui), logique lourde
   jellyfin_resolve.py   # résolution en cascade (tmdbId/id/Name/OriginalTitle + repli Radarr injecté)
-  server.py          # instancie FastMCP et enregistre tous les tools
-  __main__.py        # entrypoint: python -m media_mcp
+  server.py          # instancie FastMCP (host/port) et enregistre tous les tools
+  __main__.py        # entrypoint: python -m media_mcp — résout MCP_TRANSPORT
   clients/
     base.py          # ArrClient: httpx async, gestion des erreurs
     sonarr.py        # SonarrClient(ArrClient)
@@ -367,6 +448,17 @@ src/media_mcp/
     prowlarr_tools.py     # @mcp.tool pour Prowlarr (indexeurs)
     coordinated_tools.py  # @mcp.tool purge saison/film "partout" (arr + qui)
     jellyfin_tools.py     # @mcp.tool pour Jellyfin (collections curatives / BoxSets)
+```
+
+Déploiement :
+
+```
+Dockerfile                  # image multi-stage (uv -> venv), non-root, http:8080
+.dockerignore               # garde secrets/tests/.git hors du build context
+docker-compose.example.yml  # modèle homelab (le vrai docker-compose.yml est gitignoré)
+.github/workflows/
+  ci.yml                    # PR : lint + tests + build sans push
+  release.yml               # main : build + push GHCR (latest + SHA)
 ```
 
 Ajouter un nouveau service (ex. Jellyseerr) : créer `clients/jellyseerr.py` et

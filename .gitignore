@@ -19,9 +19,19 @@ env/
 # uv
 .uv/
 
-# Secrets
+# Secrets — tout fichier d'env sauf l'exemple (placeholders) qui, lui, est committé
 .env
+.env.*
+!.env.example
+*.env
 *.env.local
+secrets/
+
+# Docker — le compose réel porte les URLs/clés du homelab : seul l'exemple est committé
+docker-compose.yml
+docker-compose.override.yml
+docker-compose.yaml
+!docker-compose.example.yml
 
 # IDE
 .vscode/

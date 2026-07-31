@@ -1,0 +1,60 @@
+# L'image publiée sur GHCR est PUBLIQUE : rien de sensible ni d'inutile ne doit entrer
+# dans le build context. Le Dockerfile ne copie que pyproject.toml, uv.lock et src/,
+# mais on exclut quand même explicitement (défense en profondeur).
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+.env
+.env.*
+**/.env
+**/.env.*
+*.env
+**/*.env
+secrets/
+
+# ── Déploiement local (peut contenir des valeurs réelles) ────────────────────
+docker-compose.yml
+docker-compose.yaml
+docker-compose.override.yml
+docker-compose.example.yml
+Dockerfile
+.dockerignore
+
+# ── VCS & CI ─────────────────────────────────────────────────────────────────
+.git
+.gitignore
+.github
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+.venv/
+venv/
+env/
+.uv/
+
+# ── Tests & caches d'outillage ───────────────────────────────────────────────
+tests/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ── IDE / OS / docs ──────────────────────────────────────────────────────────
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+README.md

@@ -9,6 +9,13 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+    # Transport used by __main__. "stdio" stays the default so local dev and the existing
+    # Claude Desktop config keep working untouched; "http"/"sse" are for the container.
+    # host/port are only read by the HTTP transports.
+    mcp_transport: str = "stdio"
+    host: str = "0.0.0.0"
+    port: int = 8080
+
     sonarr_url: AnyHttpUrl = AnyHttpUrl("http://localhost:8989")
     sonarr_api_key: str = ""
 
