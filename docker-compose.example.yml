@@ -1,0 +1,62 @@
+# Exemple de déploiement homelab.
+# Copier en `docker-compose.yml` puis remplir — le vrai compose est gitignoré et ne doit
+# JAMAIS être committé (il porte les URLs internes et, potentiellement, des clés).
+#
+# ⚠️ L'image GHCR est PUBLIQUE : elle ne contient aucun secret. Tout arrive au runtime.
+
+services:
+  media-mcp:
+    # Remplacer <OWNER>/<REPO> (en minuscules — GHCR n'accepte pas les majuscules).
+    image: ghcr.io/<OWNER>/<REPO>:latest
+    container_name: media-mcp
+    restart: unless-stopped
+
+    # Les clés API viennent d'un .env NON committé (cf. .env.example).
+    env_file:
+      - .env
+
+    environment:
+      # Transport HTTP : c'est déjà le défaut de l'image, explicité ici pour la lisibilité.
+      # "sse" pour un client MCP qui ne parle que l'ancien transport.
+      MCP_TRANSPORT: http
+      HOST: 0.0.0.0
+      PORT: 8080
+
+      # ⚠️ URLs INTERNES du homelab uniquement — JAMAIS les URLs Cloudflare/publiques.
+      # Sur le même réseau Docker, les services se joignent par NOM DE CONTENEUR :
+      #   SONARR_URL: http://sonarr:8989
+      #   RADARR_URL: http://radarr:7878
+      #   PROWLARR_URL: http://prowlarr:9696
+      #   QUI_URL: http://qui:7476
+      #   JELLYFIN_URL: http://jellyfin:8096
+      # Les *_API_KEY correspondantes restent dans .env, pas ici.
+
+    # À NE GARDER que si un client hors du réseau Docker doit joindre le serveur.
+    # Si Hermes tourne dans le même réseau, il atteint http://media-mcp:8080/mcp
+    # directement : supprimer ce bloc plutôt que d'exposer le port.
+    # Le bind sur 127.0.0.1 évite toute exposition hors de la machine hôte.
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    networks:
+      - media
+
+    # Simple check TCP : l'image slim n'embarque ni curl ni wget.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import socket; socket.create_connection(("127.0.0.1", 8080), 3).close()
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+# Le réseau qui porte déjà sonarr/radarr/prowlarr/qui/jellyfin. media-mcp DOIT y être
+# pour les joindre par nom de conteneur. `external: true` = créé par un autre compose ;
+# adapter `name` au réseau réel (`docker network ls` pour le retrouver).
+networks:
+  media:
+    external: true
+    name: media
