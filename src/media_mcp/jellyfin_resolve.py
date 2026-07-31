@@ -327,6 +327,67 @@ async def resolve_movies(
     return Resolution(matched=matched, ambiguous=ambiguous, not_found=not_found)
 
 
+def label_library(lib: dict) -> str:
+    """Compact "Name [shortid] (type)" label for a /Library/VirtualFolders entry."""
+    kind = lib.get("CollectionType") or "mixed"
+    return f"{lib.get('Name', '?')} [{short_id(str(lib.get('ItemId', '')))}] ({kind})"
+
+
+def resolve_library(libraries: list[dict], ref: str) -> dict:
+    """Resolve a library reference (name, or ItemId / unique prefix) to one VirtualFolder.
+
+    Kept separate from :func:`resolve_single` because /Library/VirtualFolders entries key
+    their id as ``ItemId`` (not ``Id``) and carry no tmdbId/OriginalTitle — the cascade here
+    is just: exact id, id prefix, normalized name, then a conservative substring on the name.
+    Same rule as everywhere else: several candidates -> raise, never guess.
+    """
+    raw = (ref or "").strip()
+    available = ", ".join(label_library(lib) for lib in libraries) or "(none)"
+    if not raw:
+        raise JellyfinResolutionError(f"Empty library reference. Available: {available}.")
+
+    def _fail_ambiguous(candidates: list[dict]) -> None:
+        listed = "; ".join(label_library(c) for c in candidates)
+        raise JellyfinResolutionError(
+            f"Ambiguous library reference '{ref}' matches {len(candidates)}: {listed}. "
+            "Use the id (or its 8-char prefix) to disambiguate."
+        )
+
+    key = raw.lower()
+    exact_id = [lib for lib in libraries if str(lib.get("ItemId", "")).lower() == key]
+    if exact_id:
+        return exact_id[0]
+    if _ID_RE.fullmatch(raw):
+        prefixed = [
+            lib for lib in libraries if str(lib.get("ItemId", "")).lower().startswith(key)
+        ]
+        if len(prefixed) == 1:
+            return prefixed[0]
+        if len(prefixed) > 1:
+            _fail_ambiguous(prefixed)
+
+    qn = normalize_title(raw)
+    if qn:
+        by_name = [
+            lib for lib in libraries if normalize_title(str(lib.get("Name") or "")) == qn
+        ]
+        if len(by_name) == 1:
+            return by_name[0]
+        if len(by_name) > 1:
+            _fail_ambiguous(by_name)
+        partial = [
+            lib
+            for lib in libraries
+            if qn in normalize_title(str(lib.get("Name") or ""))
+        ]
+        if len(partial) == 1:
+            return partial[0]
+        if len(partial) > 1:
+            _fail_ambiguous(partial)
+
+    raise JellyfinResolutionError(f"No library found matching '{ref}'. Available: {available}.")
+
+
 def resolve_single(catalog: list[dict], ref: str, *, kind: str = "item") -> dict:
     """Resolve a single reference (collection_ref / item_ref) to exactly one item.
 
