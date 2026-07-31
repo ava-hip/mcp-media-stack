@@ -208,6 +208,10 @@ auth par header `Authorization: MediaBrowser Token="<clé>"`. Objectif : créer 
 | `jellyfin_list_movies` | read | Films de la bibliothèque (short id, titre, année, tmdbId) |
 | `jellyfin_list_collections` | read | Collections/BoxSets (short id, nom, nb d'items, description tronquée) |
 | `jellyfin_collection_items(collection_ref)` | read | Contenu d'une collection (par nom ou id) |
+| `jellyfin_playback_stats(days=7)` | read | Stats de visionnage par utilisateur sur `days` jours — **nécessite le plugin Playback Reporting** (voir ci-dessous) |
+| `jellyfin_active_sessions()` | read | Qui regarde quoi **maintenant** : utilisateur, appareil/client, item, état, progression, direct play/transcode |
+| `jellyfin_item_history(item, days=90)` | read | Historique de lecture d'**un** item (qui, quand, combien de fois, combien de temps) — **nécessite Playback Reporting** |
+| `jellyfin_scan_library(library=None, confirm=False)` | action | Déclenche un scan de bibliothèque : **global** (`library=None`) ou **ciblé** sur une bibliothèque |
 | `jellyfin_create_collection(name, movies, overview=None, confirm=False)` | write | Crée une collection depuis une liste de films ; option description (verrouillée) |
 | `jellyfin_add_to_collection(collection_ref, movies, confirm=False)` | write | Ajoute des films à une collection |
 | `jellyfin_remove_from_collection(collection_ref, movies, confirm=False)` | write | Retire des films d'une collection (les films restent en bibliothèque) |
@@ -244,6 +248,133 @@ titre Radarr ET le titre Jellyfin retenus. Sur `confirm=True`, une création/mod
 **refuse de procéder** si des références restent non résolues (pas de collection partielle en
 silence). `ProviderIds.Tmdb` est le pont fiable avec le `tmdbId` Radarr (jamais de match sur le
 titre en interne quand un tmdbId existe).
+
+#### Sessions actives (`jellyfin_active_sessions`)
+
+`GET /Sessions` renvoie **tous les clients connectés**, y compris ceux qui ne lisent rien : dans
+ce cas `NowPlayingItem` est **absent** (pas `null`) et `PlayState` ne contient que
+`CanSeek`/`IsPaused`/`IsMuted`/`RepeatMode`/`PlaybackOrder`. Le tool ne liste donc que les
+sessions **avec** `NowPlayingItem` et se contente de **compter** les clients connectés inactifs
+(« *No active playback sessions (3 client(s) connected but idle)* »). Par session : utilisateur,
+client + appareil, item (épisodes rendus « Série — S11E06 — Titre »), état playing/paused,
+progression `position / durée (%)` depuis les *ticks* (100 ns), et méthode de lecture
+(`PlayState.PlayMethod` : DirectPlay / DirectStream / Transcode) enrichie de `TranscodingInfo`
+(codecs, `TranscodeReasons`) **quand ce bloc est présent**. Le tool **décrit** l'état, il n'en
+tire aucune conclusion (l'agent décide, par exemple, s'il est prudent de lancer une suppression).
+
+> **Limite assumée** : lors de la découverte aucune session n'était **en cours de lecture**
+> (3 clients connectés, 0 en lecture). Les champs propres à une lecture active
+> (`PlayState.PositionTicks`, `PlayState.PlayMethod`, `TranscodingInfo`) sont donc issus du
+> contrat Jellyfin, pas d'une capture live — et l'OpenAPI de ce serveur répond 500, un plugin
+> cassant sa génération. Ils sont tous lus **défensivement** (absents → `?` / `unknown`, jamais
+> d'exception), ce que le cas idle exerce déjà en vrai et qu'un test couvre explicitement.
+
+#### Scan de bibliothèque (`jellyfin_scan_library`)
+
+Deux routes, **existence vérifiée sans effet de bord** (un `GET` sur une route POST-only répond
+`405 Method Not Allowed` = la route existe ; `404` = elle n'existe pas) :
+
+| Cas | Route | Effet |
+|---|---|---|
+| `library=None` | `POST /Library/Refresh` | Scan **global**, aucun paramètre |
+| `library="Films"` | `POST /Items/{ItemId}/Refresh` | Scan **ciblé** sur une bibliothèque |
+
+La bibliothèque est résolue via `GET /Library/VirtualFolders` (par **nom**, accents/casse
+normalisés — « series » trouve « Séries » —, ou par **id/préfixe 8 car.**). Ces entrées exposent
+leur id sous `ItemId` (**pas** `Id`), d'où un résolveur dédié dans `jellyfin_resolve.py`.
+Introuvable ou ambigu → message clair **listant les bibliothèques disponibles**, aucune action.
+
+Paramètres de `/Items/{id}/Refresh` **confirmés en live** (valeur invalide → 400 nommant le
+paramètre) : `metadataRefreshMode` et `imageRefreshMode` sont des **enums validés**
+(`Default` | `None` | `ValidationOnly` | `FullRefresh`), `replaceAllMetadata`,
+`replaceAllImages` et `regenerateTrickplay` sont des **booléens bindés**. **Il n'existe PAS de
+paramètre `recursive`** (il est ignoré : rafraîchir un dossier parcourt déjà ses enfants). Le
+tool envoie `Default`/`Default` avec `replaceAll*=false` — la sémantique « chercher les
+nouveaux/anciens fichiers » de l'UI, qui **conserve** métadonnées et images.
+
+`confirm=False` (défaut) est un **dry-run strict** : il annonce global (avec la liste des
+bibliothèques) ou ciblé (nom, id, type, chemins) et **n'émet aucun POST**. `confirm=True`
+déclenche ; Jellyfin exécute ensuite le scan **de façon asynchrone** (suivi dans
+Dashboard > Scheduled Tasks), la réponse confirme donc le *déclenchement*, pas la fin du scan.
+
+#### Historique par item (`jellyfin_item_history`)
+
+**Il n'existe aucun filtre par item côté API** : les paramètres `item_id`/`itemId` passés à
+`user_activity` sont acceptés (HTTP 200) mais **ignorés** — vérifié en live, payload identique.
+Le seul chemin réel est l'endpoint SQL du plugin, `POST /user_usage_stats/submit_custom_query`,
+qui interroge sa table `PlaybackActivity` (`DateCreated`, `UserId`, `ItemId`, `ItemType`,
+`ItemName`, `PlaybackMethod`, `ClientName`, `DeviceName`, `PlayDuration` en secondes).
+
+Pièges de cet endpoint, tous confirmés en live et gérés :
+
+- **Pas de requête paramétrée** : la requête est du SQL brut. Chaque id est donc validé contre
+  la forme GUID **32 hex** *avant* interpolation (et provient toujours d'une réponse Jellyfin,
+  jamais d'une saisie brute) ; tout le reste est écarté. Un test vérifie qu'une chaîne
+  d'injection ne produit **aucun** appel HTTP.
+- **`UserName` n'est pas une colonne** : avec `"ReplaceUserId": true`, le plugin remplace
+  *a posteriori* les valeurs de la colonne `UserId` par des noms et renomme l'en-tête en
+  `UserName`. Le SQL doit donc sélectionner `UserId` ; sélectionner `UserName` échoue en
+  « no such column ».
+- **La clé de réponse est `colums`** (typo du plugin), à côté de `results` (liste de listes de
+  **chaînes** — y compris les compteurs) et `message`.
+- **Les erreurs SQL arrivent en HTTP 200**, `colums`/`results` vides et un `message` commençant
+  par « Error Running Query » suivi d'une **stack trace .NET**. Un résultat *légitimement vide*
+  est lui aussi vide mais son message est « Query executed, no data returned. ». Les deux sont
+  distingués : le premier remonte une erreur propre (stack trace **retirée**), le second un
+  « no playback recorded ».
+- **Un id de série ne matche rien** : Playback Reporting enregistre l'id de la **feuille** lue.
+  Vérifié : l'id de « Grey's Anatomy » → **0** ligne, ses 97 ids d'épisodes → **38** lignes. Le
+  tool développe donc les conteneurs (`Series`/`Season`/`BoxSet`) en leurs descendants, plafonné
+  à 500 ids par requête (501 testés OK) — et **annonce** la troncature le cas échéant.
+
+`item` est résolu sur les **films ET les séries** (`resolve_media_item`) avec la cascade de
+titres déjà en place (tmdbId → id/préfixe → `Name` → `OriginalTitle`, accents/articles
+normalisés) ; un titre ambigu **liste les candidats** (id + titre) sans rien faire. Sortie :
+un agrégat **par utilisateur** (lectures, temps cumulé, dernière lecture) sur la totalité des
+lectures, puis les **20 lectures les plus récentes** en détail (le plafond est affiché).
+
+> **Limite** : l'item doit exister **dans la bibliothèque** pour être résolu. Playback Reporting
+> conserve l'historique des items supprimés depuis (constaté en live), qui reste donc
+> inatteignable par titre — passer directement l'id le retrouve.
+
+#### Stats de visionnage — dépendance au plugin **Playback Reporting**
+
+`jellyfin_playback_stats(days=7)` ne lit **pas** Jellyfin core : les statistiques viennent du
+plugin **Playback Reporting** (Dashboard > Plugins > Catalogue), qui expose ses propres routes
+sous le préfixe `/user_usage_stats`. **Plugin absent/désactivé → 404** ; c'est traduit en
+`JellyfinPluginMissingError` (sous-classe de `JellyfinClientError`) et le tool renvoie un
+message actionnable — *jamais* une exception. **Aucune variable d'env supplémentaire** : le
+tool réutilise `JELLYFIN_URL` / `JELLYFIN_API_KEY` et l'auth existante (header
+`MediaBrowser Token`, confirmé en live sur l'endpoint plugin ; la variante dépréciée
+`?api_key=` fonctionne aussi mais n'est pas utilisée).
+
+Comportement de `GET /user_usage_stats/user_activity` **vérifié en live** (Playback Reporting
+17.0.0.0 / Jellyfin 10.11.10) :
+
+- **`days` est le seul paramètre qui filtre réellement.** `end_date` et `filter` sont acceptés
+  (HTTP 200) mais **silencieusement ignorés** — payload identique quelle que soit leur valeur ;
+  ils ne sont donc pas exposés. **Sans aucun paramètre l'endpoint renvoie `[]`**, d'où le refus
+  explicite de `days < 1` (qui se lirait à tort « aucune activité »).
+- La réponse est une **liste avec une ligne PAR UTILISATEUR** (pas par item) :
+  `user_name`/`user_id`, `total_count` (nb de lectures), `total_time` (secondes),
+  `total_play_time` (chaîne lisible du plugin), et `item_name`/`client_name`/`latest_date`/
+  `last_seen` qui décrivent uniquement **la lecture la plus récente** de cet utilisateur.
+  Le tool trie par nombre de lectures décroissant et l'annonce dans sa sortie.
+- **Piège `total_time`** : le plugin accumule les durées sur un compteur 32 bits et une seule
+  ligne corrompue fait **déborder le total en négatif** (observé en live : `-2147441290`, soit
+  ≈ `int32.min`, sur un utilisateur dont le `total_count` était pourtant correct). Son propre
+  `total_play_time` est calculé depuis cette même valeur, donc tout aussi faux (« < 1 minute »).
+  Les deux sont **rejetés** : la durée s'affiche `n/a` avec une note nommant les utilisateurs
+  concernés, plutôt qu'une durée plausible mais fausse. Les compteurs de lectures, eux, restent
+  fiables.
+
+> **Cadrage** : `jellyfin_item_history` s'est greffé sur ce socle (via `_playback_report_post`).
+> Les tools restants (plus regardés, « pas vu depuis N jours »…) ne sont **pas** dans cette
+> itération mais la place est prête — même `JellyfinClient._playback_report()`, mapping 404 →
+> plugin manquant déjà mutualisé. Routes sœurs confirmées en live sur le même préfixe :
+> `/GetTvShowsReport` (par série, `count` + `time`, **non affecté** par le débordement par
+> utilisateur), `/PlayActivity` (par jour), `/HourlyReport`, `/user_list`, `/type_filter_list`,
+> et `/submit_custom_query` pour tout ce que les routes figées ne couvrent pas.
 
 #### Pièges Jellyfin gérés
 
@@ -357,8 +488,14 @@ le nombre d'items, leur(s) titre(s) et les IDs ciblés avant toute suppression.
 - `.gitignore` exclut `.env`, ses variantes et le vrai `docker-compose.yml`. Seuls
   `.env.example` et `docker-compose.example.yml` (placeholders) sont committés.
 - **Les URLs configurées doivent être les URLs INTERNES du homelab**
-  (`http://sonarr:8989`, `http://qui:7476`…), **jamais les URLs Cloudflare/publiques** :
-  elles ne doivent ni fuiter ni faire transiter le trafic par l'extérieur.
+  (`http://sonarr:8989`, `http://qui:7476`, `http://jellyfin:8096`…), **jamais les URLs
+  Cloudflare/publiques** : elles ne doivent ni fuiter ni faire transiter le trafic par
+  l'extérieur. Cela vaut pour **tous** les tools Jellyfin, les nouveaux compris
+  (`jellyfin_active_sessions`, `jellyfin_scan_library`, `jellyfin_item_history`) : ils
+  n'introduisent **aucune variable d'environnement supplémentaire** et réutilisent
+  `JELLYFIN_URL` / `JELLYFIN_API_KEY` fournies **au runtime** du conteneur (ZimaOS :
+  `env_file` / `environment`, jamais dans l'image). Si les tools Jellyfin actuels fonctionnent
+  en déployé, ceux-ci fonctionnent sans reconfiguration.
 - Le serveur MCP n'a **aucune authentification** : ne pas publier son port hors du homelab.
 
 ### Transports

@@ -10,6 +10,7 @@ Its shape mirrors QuiClient (standalone, _ensure_configured guard, one central _
 not ArrClient — Jellyfin simply does not fit the *arr mould.
 """
 
+import re
 from typing import Any
 
 import httpx
@@ -19,6 +20,7 @@ from media_mcp.clients.radarr import RadarrClient
 from media_mcp.jellyfin_resolve import (
     JellyfinResolutionError,
     Resolution,
+    resolve_library,
     resolve_movies,
     resolve_single,
 )
@@ -26,6 +28,36 @@ from media_mcp.jellyfin_resolve import (
 
 class JellyfinClientError(Exception):
     pass
+
+
+class JellyfinPluginMissingError(JellyfinClientError):
+    """A Playback Reporting route answered 404 — plugin absent, disabled or not restarted.
+
+    Subclasses JellyfinClientError so every existing ``except JellyfinClientError`` keeps
+    catching it; tools that want to phrase "optional plugin missing" differently from a real
+    failure catch this one FIRST.
+    """
+
+
+PLAYBACK_REPORTING_MISSING = (
+    "the Jellyfin server answered 404 on the Playback Reporting endpoint. Install and enable "
+    "the 'Playback Reporting' plugin (Dashboard > Plugins > Catalog), then restart Jellyfin — "
+    "watch statistics come from that plugin, not from Jellyfin core."
+)
+
+# A Jellyfin item id is a 32-char hex GUID. Every id interpolated into a Playback Reporting
+# custom query is checked against this FIRST: the plugin's /submit_custom_query takes raw SQL
+# with no placeholder support, so exact-shape validation is what keeps the query injection-free
+# (the ids themselves always come from a Jellyfin response, never from raw user input).
+_ITEM_ID_RE = re.compile(r"[0-9a-fA-F]{32}")
+
+# Upper bound on ids in one WHERE ... IN (...) clause. A series expands to one id per episode
+# (97 for a real series here; 501 verified working), so this is a safety valve, not a limit hit
+# in practice. Callers slice to it and REPORT the truncation rather than dropping ids silently.
+PLAYBACK_HISTORY_MAX_IDS = 500
+
+# Row cap on the per-item history query, so a pathological item cannot return an unbounded set.
+PLAYBACK_HISTORY_MAX_ROWS = 1000
 
 
 # BaseItemDto collection fields that Jellyfin passes through .ToList() when handling
@@ -127,6 +159,19 @@ class JellyfinClient:
     async def system_info(self) -> dict[str, Any]:
         """GET /System/Info — non user-specific, the reliable auth sanity check."""
         return await self._get("/System/Info")
+
+    async def get_sessions(self, active_within_seconds: int | None = None) -> list[dict[str, Any]]:
+        """GET /Sessions — every CONNECTED client, playing or not.
+
+        Confirmed live: a session is returned for each connected client even when it plays
+        nothing, and in that case ``NowPlayingItem`` is ABSENT (not null) and ``PlayState``
+        carries only CanSeek/IsPaused/IsMuted/RepeatMode/PlaybackOrder. Callers that want
+        "who is watching right now" must therefore filter on NowPlayingItem themselves.
+        """
+        params: dict[str, Any] = {}
+        if active_within_seconds is not None:
+            params["activeWithinSeconds"] = active_within_seconds
+        return await self._get("/Sessions", **params) or []
 
     async def get_users(self) -> list[dict[str, Any]]:
         return await self._get("/Users")
@@ -295,6 +340,189 @@ class JellyfinClient:
         """DELETE /Items/{id} — removes the collection itself (its movies are untouched)."""
         await self._request("DELETE", f"/Items/{item_id}")
 
+    # ── Libraries / scans ──────────────────────────────────────────────────────
+
+    async def get_libraries(self) -> list[dict[str, Any]]:
+        """GET /Library/VirtualFolders -> the configured libraries.
+
+        Each entry carries ``Name``, ``ItemId`` (the id to target for a scan — it matches the
+        corresponding /UserViews id), ``CollectionType`` (movies/tvshows/boxsets/...) and
+        ``Locations`` (the on-disk paths).
+        """
+        return await self._get("/Library/VirtualFolders") or []
+
+    async def resolve_library(self, ref: str) -> dict[str, Any]:
+        """Resolve a library by name or ItemId (or unique prefix); never guesses."""
+        try:
+            return resolve_library(await self.get_libraries(), ref)
+        except JellyfinResolutionError as e:
+            raise JellyfinClientError(str(e)) from e
+
+    async def refresh_all_libraries(self) -> None:
+        """POST /Library/Refresh — global scan of every library.
+
+        Route existence confirmed side-effect-free (GET on it answers 405 Method Not Allowed,
+        i.e. the path exists but is POST-only). Takes no parameter and returns immediately:
+        Jellyfin runs the scan asynchronously as a scheduled task.
+        """
+        await self._request("POST", "/Library/Refresh")
+
+    async def refresh_item(
+        self,
+        item_id: str,
+        *,
+        metadata_refresh_mode: str = "Default",
+        image_refresh_mode: str = "Default",
+        replace_all_metadata: bool = False,
+        replace_all_images: bool = False,
+    ) -> None:
+        """POST /Items/{id}/Refresh — targeted scan of one library (or any folder item).
+
+        Parameter binding confirmed live against this server: ``metadataRefreshMode`` and
+        ``imageRefreshMode`` are validated enums (Default | None | ValidationOnly |
+        FullRefresh — a bad value is rejected with a 400 naming the parameter), and
+        ``replaceAllMetadata`` / ``replaceAllImages`` / ``regenerateTrickplay`` are bound
+        booleans. There is NO ``recursive`` parameter on this route (it is silently ignored):
+        refreshing a folder already walks its children.
+
+        The defaults are the "scan for new/changed files" semantics of the web UI — existing
+        metadata and images are kept (replace_all_* stay False), so this is not destructive.
+        """
+        await self._request(
+            "POST",
+            f"/Items/{item_id}/Refresh",
+            params={
+                "metadataRefreshMode": metadata_refresh_mode,
+                "imageRefreshMode": image_refresh_mode,
+                "replaceAllMetadata": str(replace_all_metadata).lower(),
+                "replaceAllImages": str(replace_all_images).lower(),
+            },
+        )
+
+    async def library_descendant_ids(self, item_id: str, item_type: str | None = None) -> list[str]:
+        """Ids of an item plus, for a container (Series/Season/BoxSet), its descendants.
+
+        Playback Reporting records the id of the LEAF actually played, so a Series id matches
+        zero rows while its episodes' ids match all of them (verified live: 0 vs 38). Only
+        containers trigger the extra fetch.
+        """
+        ids = [str(item_id)]
+        if (item_type or "") not in ("Series", "Season", "BoxSet"):
+            return ids
+        children = await self.get_all_items(parent_id=str(item_id), recursive=True)
+        # Seasons are skipped: like the series itself they are containers that never carry a
+        # playback row, and keeping them would burn slots against PLAYBACK_HISTORY_MAX_IDS.
+        ids.extend(str(c["Id"]) for c in children if c.get("Id") and c.get("Type") != "Season")
+        # Same id can appear twice if the container lists itself; keep first-seen order.
+        seen: set[str] = set()
+        return [i for i in ids if not (i in seen or seen.add(i))]
+
+    # ── Playback Reporting (optional plugin) ───────────────────────────────────
+
+    async def _playback_report(self, path: str, **params: Any) -> Any:
+        """GET a /user_usage_stats route, mapping a 404 to JellyfinPluginMissingError.
+
+        Every Playback Reporting call goes through here so a missing plugin is reported the
+        same way everywhere. Sibling routes confirmed live on this same prefix, for the tools
+        that will follow: /PlayActivity (per-day counts), /GetTvShowsReport (per-series
+        count+time), /HourlyReport, /user_list, /type_filter_list — each is a one-line wrapper
+        next to :meth:`user_activity`.
+        """
+        try:
+            return await self._get(f"/user_usage_stats{path}", **params)
+        except JellyfinClientError as e:
+            if "HTTP 404" in str(e):
+                raise JellyfinPluginMissingError(PLAYBACK_REPORTING_MISSING) from e
+            raise
+
+    async def user_activity(self, days: int = 7, **params: Any) -> list[dict[str, Any]]:
+        """GET /user_usage_stats/user_activity — ONE row PER USER over the last `days`.
+
+        Confirmed live against Playback Reporting 17.0.0.0 / Jellyfin 10.11.10:
+
+        - ``days`` is the ONLY param that actually filters; ``end_date`` and ``filter`` are
+          accepted but silently IGNORED (identical payloads whatever their value), and
+          sending no param at all returns ``[]`` — hence the explicit default. ``**params``
+          stays open so a later plugin version can pass more without touching this method.
+        - auth is the normal MediaBrowser Token header, like every other endpoint here (the
+          deprecated ``?api_key=`` query also works; it is deliberately not used).
+
+        Row keys: ``user_id``, ``user_name``, ``total_count`` (plays), ``total_time``
+        (seconds — may be a NEGATIVE overflow, see the tool's _format_watch_time),
+        ``total_play_time`` (the plugin's own human string, derived from that same value so
+        just as wrong when it overflows), plus ``item_name`` / ``client_name`` /
+        ``latest_date`` / ``last_seen`` which describe only that user's MOST RECENT play.
+        """
+        rows = await self._playback_report("/user_activity", days=days, **params)
+        return rows if isinstance(rows, list) else []
+
+    async def playback_query(self, sql: str) -> list[dict[str, str]]:
+        """POST /user_usage_stats/submit_custom_query -> rows as column-keyed dicts.
+
+        The plugin's own reporting endpoint; there is no per-item filter anywhere else (the
+        ``item_id``/``itemId`` query params on user_activity are accepted and IGNORED —
+        verified live), so this is the only way to answer "who watched THIS item".
+
+        Contract confirmed live, and full of sharp edges:
+
+        - body is ``{"CustomQueryString": sql, "ReplaceUserId": true}``; with ReplaceUserId
+          the plugin post-processes a selected ``UserId`` column into user NAMES and renames
+          the header to ``UserName`` — so the SQL must select ``UserId``; selecting
+          ``UserName`` fails with "no such column".
+        - the response key is ``colums`` (the plugin's own typo), alongside ``results``
+          (list of lists of STRINGS — every value, including counts) and ``message``.
+        - **errors come back HTTP 200** with empty colums/results and a ``message`` starting
+          with "Error Running Query", carrying a full .NET stack trace. An empty-but-valid
+          result is also empty, but its message is "Query executed, no data returned.".
+          Those two are told apart here: the first raises, the second returns [].
+
+        Table ``PlaybackActivity`` columns: DateCreated, UserId, ItemId, ItemType, ItemName,
+        PlaybackMethod, ClientName, DeviceName, PlayDuration (seconds).
+        """
+        response = await self._playback_report_post(
+            "/submit_custom_query", {"CustomQueryString": sql, "ReplaceUserId": True}
+        )
+        message = str(response.get("message") or "")
+        if message.startswith("Error Running Query"):
+            # Strip the HTML break and the <pre> stack trace the plugin appends.
+            detail = message.split("<pre>")[0].replace("</br>", " ").strip()
+            raise JellyfinClientError(f"Playback Reporting query failed: {detail}")
+        columns = response.get("colums") or []  # sic — the plugin misspells it
+        results = response.get("results") or []
+        return [dict(zip(columns, row, strict=False)) for row in results]
+
+    async def _playback_report_post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """POST counterpart of _playback_report (same 404 -> plugin-missing mapping)."""
+        try:
+            response = await self._request("POST", f"/user_usage_stats{path}", json=body)
+        except JellyfinClientError as e:
+            if "HTTP 404" in str(e):
+                raise JellyfinPluginMissingError(PLAYBACK_REPORTING_MISSING) from e
+            raise
+        return response.json() if response.content else {}
+
+    async def item_play_history(
+        self, item_ids: list[str], days: int = 90
+    ) -> list[dict[str, str]]:
+        """Every recorded play of the given item ids over the last `days`, newest first.
+
+        Ids are validated against the 32-hex GUID shape before being interpolated (the plugin
+        endpoint takes raw SQL and offers no placeholders); anything else is dropped. Callers
+        must slice to :data:`PLAYBACK_HISTORY_MAX_IDS` themselves and report the truncation.
+        """
+        ids = [str(i) for i in item_ids if _ITEM_ID_RE.fullmatch(str(i))]
+        if not ids:
+            return []
+        in_clause = ",".join(f"'{i}'" for i in ids)
+        sql = (
+            "SELECT UserId, ItemType, ItemName, PlaybackMethod, ClientName, DeviceName, "
+            "DateCreated, PlayDuration FROM PlaybackActivity "
+            f"WHERE ItemId IN ({in_clause}) "
+            f"AND DateCreated >= datetime('now', '-{int(days)} days') "
+            f"ORDER BY DateCreated DESC LIMIT {PLAYBACK_HISTORY_MAX_ROWS}"
+        )
+        return await self.playback_query(sql)
+
     # ── Reference resolution (thin async wrappers over the pure resolver) ───────
 
     async def _fetch_radarr_catalog(self) -> list[dict[str, Any]] | None:
@@ -323,6 +551,22 @@ class JellyfinClient:
     async def resolve_collection(self, ref: str) -> dict[str, Any]:
         try:
             return resolve_single(await self.collection_catalog(), ref, kind="collection")
+        except JellyfinResolutionError as e:
+            raise JellyfinClientError(str(e)) from e
+
+    async def resolve_media_item(self, ref: str) -> dict[str, Any]:
+        """Resolve a MOVIE or SERIES by tmdbId / id / Name / OriginalTitle (shared cascade).
+
+        Wider than :meth:`resolve_item` (movies + collections) because playback history is
+        just as often asked for a series. Episodes are not indexed — the catalog would explode
+        and their titles collide across seasons — but an episode's own id still resolves via
+        :meth:`library_descendant_ids` when its series is the reference.
+        """
+        catalog = await self.get_all_items(
+            include_item_types="Movie,Series", fields="ProviderIds,OriginalTitle"
+        )
+        try:
+            return resolve_single(catalog, ref, kind="item")
         except JellyfinResolutionError as e:
             raise JellyfinClientError(str(e)) from e
 
