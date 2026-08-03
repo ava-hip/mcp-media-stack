@@ -55,6 +55,37 @@ class ProwlarrClient(ArrClient):
             params["categories"] = categories
         return await self._get("/search", **params)
 
+    async def recent_feed(self, indexer_id: int, category: int) -> list[dict[str, Any]]:
+        """Return ONE indexer's latest releases for ONE category, newest-first-ish.
+
+        An empty ``query`` makes Prowlarr hand the request straight to the indexer's
+        Torznab endpoint as a "latest releases" feed — the only way to get releases by
+        publication date instead of by seeders. Verified on this instance: the empty feed
+        is also the *freshest* view obtainable, no keyword search reaches anything newer
+        (C411's newest empty-feed item was 0.2h old vs 262h for the best keyword).
+
+        Deliberately NOT folded into :meth:`search`: that one is the seeders-ranked
+        keyword search whose signature ``prowlarr_search`` depends on.
+
+        Three caveats, all measured on this instance — do not "simplify" them away:
+        - ``indexerIds=-1`` (what the Servarr docs show for "all indexers") makes Prowlarr
+          answer HTTP 400 "all selected indexers being unavailable". Passing one explicit
+          indexer id per call avoids it *and* yields per-indexer failure detail.
+        - every indexer advertises ``limits default=100 max=100``, and ``limit``/``offset``/
+          ``sort`` are all ignored (``offset=100`` returns HTTP 200 with zero items), so the
+          100-result cap is absolute and there is no paging.
+        - the cap applies per REQUEST, so one request per category is mandatory:
+          ``categories=[2000, 5000]`` returns 100 rows per indexer TOTAL, i.e. half of what
+          two separate calls return.
+        """
+        return await self._get(
+            "/search",
+            query="",
+            type="search",
+            categories=category,
+            indexerIds=indexer_id,
+        )
+
     async def grab(self, guid: str, indexer_id: int) -> dict[str, Any]:
         """Send a release to Prowlarr's download client (POST /search {guid, indexerId}).
 
