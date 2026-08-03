@@ -318,6 +318,14 @@ class MovieLookupResult(BaseModel):
     year: int
     tmdb_id: int
     overview: str
+    # Radarr localises `title`, so the original title is what identifies the work behind a
+    # French distribution title. Empty when Radarr reports it identical to `title`.
+    original_title: str = ""
+    studio: str = ""
+    genres: list[str] = []
+    runtime: int = 0  # minutes, 0 when unknown
+    # (value, votes) per source; absent sources are simply missing from the dict.
+    ratings: dict[str, tuple[float, int]] = {}
 
 
 class CalendarMovie(BaseModel):
