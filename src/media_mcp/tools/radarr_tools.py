@@ -1,3 +1,4 @@
+import unicodedata
 from datetime import date, timedelta
 
 from mcp.server.fastmcp import FastMCP
@@ -38,6 +39,33 @@ def _relevant_release(movie: dict) -> tuple[str, str]:
 
 def _client() -> RadarrClient:
     return RadarrClient(str(settings.radarr_url), settings.radarr_api_key)
+
+
+def _clean_title(title: str) -> str:
+    """Strip Unicode format/control characters from a title.
+
+    TMDB ships some titles with invisible bidi marks: tmdbId 980431 comes back as
+    "‎Avatar Aang, le dernier maître de l'air", whose leading U+200E defeats any exact
+    comparison the caller might make against a release name or another title. Categories Cf
+    (format) and Cc (control) are dropped; everything else, accents included, is untouched.
+    """
+    return "".join(c for c in (title or "") if unicodedata.category(c) not in ("Cf", "Cc")).strip()
+
+
+def _lookup_ratings(movie: dict) -> dict[str, tuple[float, int]]:
+    """Pull (value, votes) for imdb and tmdb out of Radarr's nested `ratings` object.
+
+    A source missing, null, or with zero votes is omitted rather than shown as 0 — an
+    unrated film must not read as a badly rated one.
+    """
+    raw = movie.get("ratings") or {}
+    out: dict[str, tuple[float, int]] = {}
+    for source in ("imdb", "tmdb"):
+        entry = raw.get(source) or {}
+        value, votes = entry.get("value"), entry.get("votes")
+        if value:
+            out[source] = (float(value), int(votes or 0))
+    return out
 
 
 def register_radarr_tools(mcp: FastMCP) -> None:
@@ -90,19 +118,40 @@ def register_radarr_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def radarr_lookup_movie(term: str) -> str:
-        """Search Radarr for a movie by title (for adding a new movie).
+        """Identify a film via Radarr's TMDB lookup. Returns the tmdbId radarr_add_movie needs.
 
-        Returns tmdbId needed for radarr_add_movie.
+        `term` accepts a title, but also an exact id: term="tmdb:82170" (or "imdb:tt0140381")
+        resolves to that one film with no fuzzy title matching at all. Prefer it whenever you
+        already hold an id — a title search on a French title is guesswork, an id is not.
+
+        Why the original title matters: Radarr localises `title` to its configured language,
+        so what comes back is a distribution title ("Les Aventuriers De L Arche Perdue") while
+        indexer releases, external databases and the caller's own knowledge are usually keyed
+        on the original ("Raiders of the Lost Ark"). Both are returned — `orig:` is shown only
+        when it actually differs from the localised title. Titles are stripped of Unicode
+        format/control characters first: TMDB ships some with invisible bidi marks that break
+        exact comparison.
+
+        Per result: tmdbId, localised title, year, original title when different, then studio,
+        genres, runtime and imdb/tmdb ratings with their vote counts, then the overview
+        (truncated). Fields the lookup does not supply are omitted rather than shown empty.
+        Note that Radarr's lookup carries NO credits — there is no director or cast field, so
+        do not report one from memory as if it came from here.
         """
         try:
             async with _client() as c:
                 data = await c.lookup_movie(term)
             results = [
                 MovieLookupResult(
-                    title=m["title"],
+                    title=_clean_title(m.get("title", "")),
                     year=m.get("year", 0),
                     tmdb_id=m.get("tmdbId", 0),
                     overview=(m.get("overview") or "")[:200],
+                    original_title=_clean_title(m.get("originalTitle", "")),
+                    studio=m.get("studio") or "",
+                    genres=m.get("genres") or [],
+                    runtime=m.get("runtime") or 0,
+                    ratings=_lookup_ratings(m),
                 )
                 for m in data[:10]
             ]
@@ -110,7 +159,28 @@ def register_radarr_tools(mcp: FastMCP) -> None:
                 return f"No results for '{term}'."
             lines = [f"Results for '{term}':"]
             for r in results:
-                lines.append(f"  [{r.tmdb_id}] {r.title} ({r.year}) — {r.overview}")
+                head = f"  [{r.tmdb_id}] {r.title} ({r.year})"
+                # Only worth a mention when it is not the same string as the localised title.
+                if r.original_title and r.original_title != r.title:
+                    head += f"  orig: {r.original_title}"
+                lines.append(head)
+                facts = []
+                if r.studio:
+                    facts.append(r.studio)
+                if r.genres:
+                    facts.append(", ".join(r.genres))
+                if r.runtime:
+                    facts.append(f"{r.runtime} min")
+                # Rounded to one decimal: imdb reports 8.4 where tmdb reports 7.926, and the
+                # two are only comparable at the same precision.
+                facts.extend(
+                    f"{source} {value:.1f} ({votes} vote{'' if votes == 1 else 's'})"
+                    for source, (value, votes) in r.ratings.items()
+                )
+                if facts:
+                    lines.append(f"     {'  ·  '.join(facts)}")
+                if r.overview:
+                    lines.append(f"     {r.overview}")
             return "\n".join(lines)
         except ArrClientError as e:
             return f"Error: {e}"

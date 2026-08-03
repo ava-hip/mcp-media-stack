@@ -118,6 +118,142 @@ async def test_lookup_movie(client):
     assert data[0]["tmdbId"] == 438631
 
 
+# ── lookup_movie tool output ──────────────────────────────────────────────────
+# Payloads below are trimmed copies of real Radarr lookup responses.
+
+
+def _lookup_payload(**overrides) -> dict:
+    movie = {
+        "title": "Les Aventuriers de l'arche perdue",
+        "originalTitle": "Raiders of the Lost Ark",
+        "year": 1981,
+        "tmdbId": 85,
+        "overview": "L'Arche d'Alliance contenant les tables de la Loi...",
+        "studio": "Paramount Pictures",
+        "genres": ["Adventure", "Action"],
+        "runtime": 115,
+        "ratings": {
+            "imdb": {"votes": 1115439, "value": 8.4, "type": "user"},
+            "tmdb": {"votes": 13791, "value": 7.926, "type": "user"},
+            "trakt": {"votes": 50, "value": 8.1, "type": "user"},
+        },
+    }
+    movie.update(overrides)
+    return movie
+
+
+@respx.mock
+async def test_lookup_movie_tool_shows_original_title_and_metadata(monkeypatch):
+    respx.get(f"{BASE}/movie/lookup").mock(
+        return_value=Response(200, json=[_lookup_payload()])
+    )
+    fn = _radarr_tool("radarr_lookup_movie", monkeypatch)
+    result = await fn(term="tmdb:85")
+
+    assert "[85] Les Aventuriers de l'arche perdue (1981)" in result
+    # The original title is what identifies the work behind a French distribution title.
+    assert "orig: Raiders of the Lost Ark" in result
+    assert "Paramount Pictures" in result
+    assert "Adventure, Action" in result
+    assert "115 min" in result
+    # Both value and vote count, rounded to a common precision (tmdb ships 7.926).
+    assert "imdb 8.4 (1115439 votes)" in result
+    assert "tmdb 7.9 (13791 votes)" in result
+
+
+@respx.mock
+async def test_lookup_movie_tool_omits_original_title_when_identical(monkeypatch):
+    respx.get(f"{BASE}/movie/lookup").mock(
+        return_value=Response(
+            200,
+            json=[
+                _lookup_payload(
+                    title="La Minute de vérité",
+                    originalTitle="La Minute de vérité",
+                    year=1952,
+                    tmdbId=82170,
+                )
+            ],
+        )
+    )
+    fn = _radarr_tool("radarr_lookup_movie", monkeypatch)
+    result = await fn(term="tmdb:82170")
+
+    assert "[82170] La Minute de vérité (1952)" in result
+    assert "orig:" not in result
+
+
+@respx.mock
+async def test_lookup_movie_tool_strips_invisible_format_characters(monkeypatch):
+    # Real case: tmdbId 980431 arrives with a leading U+200E that breaks exact comparison.
+    respx.get(f"{BASE}/movie/lookup").mock(
+        return_value=Response(
+            200,
+            json=[
+                _lookup_payload(
+                    title="‎Avatar Aang, le dernier maître de l'air",
+                    originalTitle="Avatar Aang: The Last Airbender",
+                    year=2026,
+                    tmdbId=980431,
+                )
+            ],
+        )
+    )
+    fn = _radarr_tool("radarr_lookup_movie", monkeypatch)
+    result = await fn(term="tmdb:980431")
+
+    assert "‎" not in result
+    assert "[980431] Avatar Aang, le dernier maître de l'air (2026)" in result
+    assert "orig: Avatar Aang: The Last Airbender" in result
+
+
+@respx.mock
+async def test_lookup_movie_tool_omits_missing_fields(monkeypatch):
+    respx.get(f"{BASE}/movie/lookup").mock(
+        return_value=Response(
+            200,
+            json=[
+                {
+                    "title": "Bare Minimum",
+                    "year": 1968,
+                    "tmdbId": 673838,
+                    "overview": "",
+                    "studio": "ORTF",
+                    "genres": ["Drama"],
+                    "runtime": 92,
+                    "ratings": {"imdb": {"votes": 0, "value": 0}},
+                }
+            ],
+        )
+    )
+    fn = _radarr_tool("radarr_lookup_movie", monkeypatch)
+    result = await fn(term="Bare")
+
+    assert "ORTF  ·  Drama  ·  92 min" in result
+    # An unrated film must not read as a badly rated one.
+    assert "imdb" not in result
+    assert "0 votes" not in result
+
+
+@respx.mock
+async def test_lookup_movie_tool_singular_vote(monkeypatch):
+    respx.get(f"{BASE}/movie/lookup").mock(
+        return_value=Response(
+            200,
+            json=[_lookup_payload(ratings={"tmdb": {"votes": 1, "value": 6.0}})],
+        )
+    )
+    fn = _radarr_tool("radarr_lookup_movie", monkeypatch)
+    assert "tmdb 6.0 (1 vote)" in await fn(term="tmdb:85")
+
+
+@respx.mock
+async def test_lookup_movie_tool_no_results(monkeypatch):
+    respx.get(f"{BASE}/movie/lookup").mock(return_value=Response(200, json=[]))
+    fn = _radarr_tool("radarr_lookup_movie", monkeypatch)
+    assert "No results for 'zzz'" in await fn(term="zzz")
+
+
 @respx.mock
 async def test_http_error_raises_arr_client_error(client):
     respx.get(f"{BASE}/movie").mock(return_value=Response(403, text="Forbidden"))
